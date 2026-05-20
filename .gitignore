@@ -1,0 +1,15 @@
+# FFmpeg binary (303MB, not needed in repo)
+ffmpeg_temp/
+
+# WorkBuddy personal workspace data
+.workbuddy/
+
+# Learning notes / research docs (not for public repo)
+R1_SDK学习总结与开发建议.md
+R1展厅控制程序_技术入门手册.md
+R1展厅控制程序_技术学习报告.md
+SDK_vs_ROS_关系详解.md
+
+# System files
+.DS_Store
+Thumbs.db
