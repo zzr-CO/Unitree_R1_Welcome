@@ -5,11 +5,14 @@ ffmpeg_temp/
 .workbuddy/
 
 # Learning notes / research docs (not for public repo)
-R1_SDK学习总结与开发建议.md
-R1展厅控制程序_技术入门手册.md
-R1展厅控制程序_技术学习报告.md
-SDK_vs_ROS_关系详解.md
-r1_show_control.cpp
+R1本体/R1_SDK学习总结与开发建议.md
+R1本体/R1展厅控制程序_技术入门手册.md
+R1本体/R1展厅控制程序_技术学习报告.md
+R1本体/SDK_vs_ROS_关系详解.md
+R1本体/r1_show_control.cpp
+
+# 灵巧手 (暂不上传)
+灵巧手/
 
 # System files
 .DS_Store
