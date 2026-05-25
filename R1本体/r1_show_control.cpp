@@ -20,18 +20,20 @@
  *   实时查看: sudo journalctl -u r1-show.service -f
  *
  * 编译（在 unitree_sdk2-1.0 根目录）：
- *   g++ -std=c++17 r1_show_control_dual_voice.cpp \
+ *   g++ -std=c++17 r1_show_control.cpp \
  *       -I./include -I./thirdparty/include/ddscxx \
  *       -L./lib/aarch64 -L./thirdparty/lib/aarch64 \
  *       -lunitree_sdk2 -lddscxx -lddsc -lpthread \
  *       -Wl,-rpath,./lib/aarch64:./thirdparty/lib/aarch64 \
- *       -o r1_show_control_dual
+ *       -o r1_show_control
  *
  * 运行：
- *   ./r1_show_control_dual eth10
+ *   ./r1_show_control eth10
  * =============================================================
  */
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -48,17 +50,20 @@
 #include <vector>
 #include <sys/stat.h>
 
+#include "unitree/idl/go2/MotorCmds_.hpp"
 #include "unitree/idl/go2/WirelessController_.hpp"
+#include "unitree/robot/channel/channel_publisher.hpp"
 #include "unitree/robot/channel/channel_subscriber.hpp"
 #include "unitree/robot/g1/arm/g1_arm_action_client.hpp"
 #include "unitree/robot/g1/audio/g1_audio_client.hpp"
 
 #define TOPIC_JOYSTICK "rt/wirelesscontroller"
+#define TOPIC_RIGHT_HAND "rt/brainco/right/cmd"
 
 using namespace std::chrono_literals;
 
 /* ============ 时间戳日志（同时输出到 stdout 和本地文件）============ */
-static constexpr const char* LOG_FILE = "/var/log/r1_show_control_dual.log";
+static constexpr const char* LOG_FILE = "/var/log/r1_show_control.log";
 static std::mutex g_log_mutex;
 
 static std::string NowStr() {
@@ -126,6 +131,55 @@ static constexpr double  WAIT_BUFFER  = 1.0;     // 音频结束后等待1秒再
 static constexpr int PCM_RATE      = 16000;
 static constexpr int PCM_CHANNELS  = 1;
 static constexpr int PCM_BYTES_SEC = PCM_RATE * PCM_CHANNELS * 2;
+
+/* ==================== 右手灵巧手 DDS 控制 ==================== */
+using HandCmds = unitree_go::msg::dds_::MotorCmds_;
+using HandPose = std::array<float, 6>;
+
+static constexpr float HAND_FINGER_SPEED = 1.0f;
+static constexpr int SCENE_V_HAND_ID = 1;  // 场景2：←+B 脸部挥手
+
+static const HandPose HAND_OPEN_POSE = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+static const HandPose HAND_V_POSE    = {1.f, 1.f, 0.f, 0.f, 1.f, 1.f};
+
+static std::atomic<bool> g_hand_publish_running{true};
+static std::mutex g_hand_pose_mutex;
+static HandPose g_current_hand_pose = HAND_OPEN_POSE;
+
+static void SetHandPoseMsg(HandCmds& msg, const HandPose& pose) {
+    msg.cmds().resize(6);
+    for (size_t i = 0; i < pose.size(); ++i) {
+        msg.cmds()[i].q() = pose[i];
+        msg.cmds()[i].dq() = HAND_FINGER_SPEED;
+    }
+}
+
+static void SetRightHandPose(const HandPose& pose) {
+    std::lock_guard<std::mutex> lk(g_hand_pose_mutex);
+    g_current_hand_pose = pose;
+}
+
+static HandPose GetRightHandPose() {
+    std::lock_guard<std::mutex> lk(g_hand_pose_mutex);
+    return g_current_hand_pose;
+}
+
+static void RightHandPublishLoop(unitree::robot::ChannelPublisher<HandCmds>* publisher) {
+    HandCmds msg;
+    msg.cmds().resize(6);
+
+    while (g_hand_publish_running.load()) {
+        SetHandPoseMsg(msg, GetRightHandPose());
+        publisher->Write(msg, 0);
+        std::this_thread::sleep_for(100ms);
+    }
+}
+
+static void HoldRightHandPose(const HandPose& pose, std::chrono::milliseconds duration) {
+    SetRightHandPose(pose);
+    std::this_thread::sleep_for(duration);
+}
+/* ============================================================= */
 
 /* ==================== 动作时长表（实测数据，单位秒）==================== */
 static double GetActionDuration(int32_t action_id) {
@@ -212,6 +266,14 @@ void PlayScene(int id,
         + ", 动作=" + s.action_name + "(id=" + std::to_string(s.action_id) + ")"
         + ", 时长=" + std::to_string(dur) + "s]");
 
+    const bool use_v_hand = (id == SCENE_V_HAND_ID);
+    if (use_v_hand) {
+        LOG("  右手灵巧手切换为比耶姿态");
+        SetRightHandPose(HAND_V_POSE);
+    } else {
+        SetRightHandPose(HAND_OPEN_POSE);
+    }
+
     /* 绿灯 */
     audio->LedControl(0, 255, 0);
 
@@ -256,6 +318,12 @@ void PlayScene(int id,
     audio->LedControl(0, 0, 0);
     audio->PlayStop("r1_show");
     if (arm_ok) arm->ExecuteAction(ACT_RELEASE);
+    if (use_v_hand) {
+        LOG("  右手灵巧手张开复位");
+        HoldRightHandPose(HAND_OPEN_POSE, 1000ms);
+    } else {
+        SetRightHandPose(HAND_OPEN_POSE);
+    }
 
     LOG("  ✓ 场景完成");
 }
@@ -333,6 +401,13 @@ int main(int argc, char const* argv[]) {
         LOG("手臂服务就绪");
         arm_ok = true;
     } catch (...) { WARN("手臂服务不可用，仅语音"); }
+
+    /* 右手灵巧手 DDS Publisher */
+    unitree::robot::ChannelPublisher<HandCmds> right_hand_pub(TOPIC_RIGHT_HAND);
+    right_hand_pub.InitChannel();
+    SetRightHandPose(HAND_OPEN_POSE);
+    std::thread right_hand_thread(RightHandPublishLoop, &right_hand_pub);
+    LOG("右手灵巧手 DDS 发布就绪: " + std::string(TOPIC_RIGHT_HAND));
 
     /* PCM - 加载两套音频 */
     LOG("加载 PCM 音频（双音色版本）...");
@@ -474,6 +549,11 @@ int main(int argc, char const* argv[]) {
     /* 退出 */
     LOG("安全退出中...");
     if (arm_ok) arm->ExecuteAction(ACT_RELEASE);
+    HoldRightHandPose(HAND_OPEN_POSE, 1000ms);
+    g_hand_publish_running.store(false);
+    if (right_hand_thread.joinable()) {
+        right_hand_thread.join();
+    }
     audio->LedControl(0, 0, 0);
     LOG("程序已退出");
     return 0;
