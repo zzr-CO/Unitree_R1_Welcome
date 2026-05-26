@@ -1,456 +1,611 @@
-# systemd 使用指南
+# R1 项目 systemd 与 sudo 使用指南
 
-## 📚 什么是 systemd？
+这份文档只围绕当前 R1 迎宾项目常用操作展开。重点是看懂 `sudo`、`systemctl`、`journalctl`，以及怎么查看、启动、停止、排查 `r1-show-control.service`。
 
-**systemd** 是 Linux 系统的**初始化系统和服务管理器**，负责：
-- 系统启动时启动服务
-- 管理后台服务（启动、停止、重启）
-- 查看服务状态和日志
-- 服务崩溃时自动重启
+## 一、先分清几个概念
 
-**为什么需要 systemd？**
-- ✅ 开机自动启动程序（不需要手动运行）
-- ✅ 程序崩溃自动重启
-- ✅ 统一管理所有后台服务
-- ✅ 集中查看日志
+### 1. sudo 是什么
 
----
+`sudo` 的意思是“用管理员权限执行这一条命令”。
 
-## 🔧 systemd 核心概念
+普通用户 `unitree` 可以查看很多信息，但不能随便修改系统服务、删除系统目录里的文件、重启系统。遇到这些操作时，就需要在命令前面加 `sudo`。
 
-### **1. Unit（单元）**
-systemd 管理的基本对象，分为多种类型：
-- **service**：系统服务（最常用）
-- **target**：一组服务的集合（类似运行级别）
-- **timer**：定时器（类似 cron）
-- **socket**：网络套接字
+常见规律：
 
-### **2. Service（服务）**
-一个后台运行的程序，比如：
-- `ssh.service`：SSH 服务
-- `nginx.service`：Nginx Web 服务器
-- `r1-show.service`：你的 R1 机器人控制程序
+| 操作 | 是否通常需要 `sudo` | 示例 |
+|---|---:|---|
+| 查看服务状态 | 不一定 | `systemctl status r1-show-control.service` |
+| 查看服务列表 | 不需要 | `systemctl list-units --type=service --all` |
+| 启动/停止/重启服务 | 需要 | `sudo systemctl restart r1-show-control.service` |
+| 设置开机自启 | 需要 | `sudo systemctl enable r1-show-control.service` |
+| 修改 `/etc/systemd/system/` | 需要 | `sudo nano /etc/systemd/system/r1-show-control.service` |
+| 删除 `/var/log/` 日志 | 通常需要 | `sudo rm -f /var/log/r1_show_control.log` |
+| 重启机器人 | 需要 | `sudo reboot` |
 
-### **3. Service File（服务文件）**
-定义服务如何启动、重启、依赖关系的配置文件，位于：
-```
-/etc/systemd/system/r1-show.service
+简单记法：
+
+```text
+看信息：大多不用 sudo
+改系统：基本都要 sudo
 ```
 
----
+### 2. systemd 是什么
 
-## 📝 服务文件结构
+`systemd` 是 Linux 系统里的服务管理器。机器人开机后，哪些后台程序要自动启动、程序挂了要不要重启，都是它管。
 
-### **示例：r1-show.service**
-```ini
-[Unit]
-Description=Unitree R1 Showroom Control
-After=network-online.target
-Wants=network-online.target
+在本项目里，迎宾程序就是通过 systemd 做成后台服务运行的。
 
-[Service]
-Type=simple
-ExecStart=/bin/bash -c '/usr/local/bin/r1_show_control eth10 >> /var/log/r1_show_control.log 2>&1'
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
+### 3. systemctl 是什么
 
-[Install]
-WantedBy=multi-user.target
-```
+`systemctl` 是你操作 systemd 的命令。
 
-### **各部分说明**
+比如：
 
-#### **[Unit] 部分**
-| 指令 | 说明 | 示例 |
-|------|------|------|
-| `Description` | 服务描述 | `Description=Unitree R1 Showroom Control` |
-| `After` | 在哪个服务启动后再启动 | `After=network-online.target` |
-| `Wants` | 弱依赖（可选） | `Wants=network-online.target` |
-| `Requires` | 强依赖（必须） | `Requires=nginx.service` |
-
-#### **[Service] 部分**
-| 指令 | 说明 | 示例 |
-|------|------|------|
-| `Type` | 服务类型 | `Type=simple` |
-| `ExecStart` | 启动命令 | `ExecStart=/usr/local/bin/app` |
-| `ExecStop` | 停止命令 | `ExecStop=/bin/kill -TERM $MAINPID` |
-| `Restart` | 重启策略 | `Restart=always` |
-| `RestartSec` | 重启延迟 | `RestartSec=5` |
-| `User` | 运行用户 | `User=unitree` |
-| `WorkingDirectory` | 工作目录 | `WorkingDirectory=/home/unitree` |
-
-**Restart 策略：**
-- `no`：不重启（默认）
-- `always`：总是重启
-- `on-failure`：只有非正常退出才重启
-- `on-abnormal`：只有信号杀死或超时才重启
-
-#### **[Install] 部分**
-| 指令 | 说明 | 示例 |
-|------|------|------|
-| `WantedBy` | 启用时链接到哪个 target | `WantedBy=multi-user.target` |
-
-**常用 target：**
-- `multi-user.target`：多用户命令行模式（常用）
-- `graphical.target`：图形界面模式
-
----
-
-## 🛠️ 常用命令
-
-### **1. 服务管理**
-
-#### **启动服务**
 ```bash
-sudo systemctl start r1-show.service
+systemctl status r1-show-control.service
+sudo systemctl restart r1-show-control.service
+sudo systemctl enable r1-show-control.service
 ```
 
-#### **停止服务**
+可以理解为：
+
+```text
+systemd：后台管理系统
+systemctl：你用来指挥 systemd 的命令
+```
+
+### 4. journalctl 是什么
+
+`journalctl` 用来查看 systemd 收集到的服务日志。
+
+如果服务启动失败、反复重启、没有输出，可以先用：
+
 ```bash
-sudo systemctl stop r1-show.service
+journalctl -u r1-show-control.service -n 50
 ```
 
-#### **重启服务**
+实时跟踪日志：
+
 ```bash
-sudo systemctl restart r1-show.service
+journalctl -u r1-show-control.service -f
 ```
 
-#### **重新加载配置（不重启）**
+如果提示权限不够，就加 `sudo`：
+
 ```bash
-sudo systemctl reload r1-show.service
+sudo journalctl -u r1-show-control.service -f
 ```
 
-#### **启用开机自启动**
+## 二、当前 R1 项目里常见对象
+
+### 1. 当前主服务
+
+当前迎宾主程序服务名：
+
+```text
+r1-show-control.service
+```
+
+常见服务文件路径：
+
+```text
+/etc/systemd/system/r1-show-control.service
+```
+
+常见可执行文件路径：
+
+```text
+/usr/local/bin/r1_show_control
+```
+
+常见日志文件：
+
+```text
+/var/log/r1_show_control.log
+```
+
+### 2. 服务、进程、可执行文件、日志不是一回事
+
+| 名称 | 含义 | 例子 |
+|---|---|---|
+| 服务 | systemd 管理规则 | `r1-show-control.service` |
+| 进程 | 正在运行的程序实例 | `/usr/local/bin/r1_show_control eth10` |
+| 可执行文件 | 真正被运行的程序文件 | `/usr/local/bin/r1_show_control` |
+| 日志文件 | 程序输出保存的位置 | `/var/log/r1_show_control.log` |
+
+所以：
+
+- 删除日志，不等于删除服务。
+- 停止服务，不等于禁用开机自启。
+- 删除服务文件，不等于杀掉当前已经运行的进程。
+- 重新编译程序，不等于 systemd 已经运行新版本。
+
+## 三、查看 R1 相关服务
+
+### 1. 查看所有服务
+
 ```bash
-sudo systemctl enable r1-show.service
+systemctl list-units --type=service --all
 ```
 
-#### **禁用开机自启动**
+这个会列出当前 systemd 知道的所有 service，包括运行中和未运行的。
+
+### 2. 只看 r1 开头的服务
+
 ```bash
-sudo systemctl disable r1-show.service
+systemctl list-units --type=service --all 'r1*'
 ```
 
-#### **查看服务状态**
+这是排查 R1 项目最常用的命令之一。
+
+### 3. 查看已安装的 r1 服务文件
+
 ```bash
-sudo systemctl status r1-show.service
+systemctl list-unit-files 'r1*'
 ```
 
-**输出示例：**
-```
-● r1-show.service - Unitree R1 Showroom Control
-   Loaded: loaded (/etc/systemd/system/r1-show.service; enabled)
-   Active: active (running) since Tue 2026-05-12 13:00:00 CST; 5min ago
- Main PID: 12345 (r1_show_contro)
-    Tasks: 10
-   Memory: 50.0M
-   CGroup: /system.slice/r1-show.service
-           └─12345 /usr/local/bin/r1_show_control eth10
+区别：
+
+```text
+list-units：看当前 systemd 加载到的服务单元状态
+list-unit-files：看系统里安装了哪些服务文件，以及是否 enabled
 ```
 
-**状态说明：**
-- `active (running)`：正在运行
-- `active (exited)`：成功执行并退出
-- `inactive (dead)`：未运行
-- `failed`：启动失败
+### 4. 查看 r1 相关进程
 
----
-
-### **2. 查看日志**
-
-#### **查看服务日志（实时）**
 ```bash
-sudo journalctl -u r1-show.service -f
+ps aux | grep '[r]1'
 ```
-- `-u`：指定服务
-- `-f`：实时跟踪（类似 `tail -f`）
 
-#### **查看最近 50 行日志**
+这个比 `ps aux | grep r1` 干净一些，因为它不会把 `grep r1` 自己也显示出来。
+
+如果你看到类似：
+
+```text
+/usr/local/bin/r1_show_control eth10
+```
+
+说明迎宾程序进程正在运行。
+
+## 四、管理当前迎宾服务
+
+### 1. 查看状态
+
 ```bash
-sudo journalctl -u r1-show.service -n 50
+systemctl status r1-show-control.service
 ```
 
-#### **查看今天以来的日志**
+常见状态：
+
+| 状态 | 含义 |
+|---|---|
+| `active (running)` | 服务正在运行 |
+| `inactive (dead)` | 服务没有运行 |
+| `failed` | 服务启动失败 |
+| `enabled` | 已设置开机自启 |
+| `disabled` | 没有设置开机自启 |
+
+如果普通用户看不到完整信息，可以用：
+
 ```bash
-sudo journalctl -u r1-show.service --since today
+sudo systemctl status r1-show-control.service
 ```
 
-#### **查看指定时间段的日志**
+### 2. 启动服务
+
 ```bash
-sudo journalctl -u r1-show.service --since "2026-05-12 10:00:00" --until "2026-05-12 12:00:00"
+sudo systemctl start r1-show-control.service
 ```
 
-#### **查看错误日志**
+只启动当前这一次，不代表开机自启。
+
+### 3. 停止服务
+
 ```bash
-sudo journalctl -u r1-show.service --priority=err
+sudo systemctl stop r1-show-control.service
 ```
 
-**优先级：**
-- `0` / `emerg`：紧急
-- `1` / `alert`：警报
-- `2` / `crit`：严重
-- `3` / `err`：错误
-- `4` / `warning`：警告
-- `5` / `notice`：注意
-- `6` / `info`：信息
-- `7` / `debug`：调试
+只停止当前这一次。如果服务仍然是 `enabled`，下次开机还会自动启动。
 
----
+### 4. 重启服务
 
-### **3. 系统级命令**
-
-#### **重新加载 systemd 配置**
 ```bash
-sudo systemctl daemon-reload
+sudo systemctl restart r1-show-control.service
 ```
-**什么时候用？**
-- 修改了服务文件（`.service`）
-- 创建了新的服务文件
 
-#### **列出所有正在运行的服务**
+修改了程序、更新了可执行文件后，常用这个让服务重新跑起来。
+
+### 5. 设置开机自启
+
 ```bash
-sudo systemctl list-units --type=service --state=running
+sudo systemctl enable r1-show-control.service
 ```
 
-#### **列出所有服务（包括未运行的）**
+这表示机器人下次开机后，systemd 会自动启动这个服务。
+
+### 6. 取消开机自启
+
 ```bash
-sudo systemctl list-units --type=service --all
+sudo systemctl disable r1-show-control.service
 ```
 
-#### **检查服务是否启用**
+这只是不让它下次开机自动启动，不一定会停止当前正在运行的服务。
+
+如果想“现在也停掉，以后也不自启”，要连续执行：
+
 ```bash
-sudo systemctl is-enabled r1-show.service
-```
-**输出：**
-- `enabled`：已启用开机自启动
-- `disabled`：未启用
-- `static`：不能单独启用（被其他服务依赖）
-
----
-
-### **4. 关机/重启**
-
-#### **重启系统**
-```bash
-sudo systemctl reboot
+sudo systemctl stop r1-show-control.service
+sudo systemctl disable r1-show-control.service
 ```
 
-#### **关机**
-```bash
-sudo systemctl poweroff
+### 7. 修改服务文件后重新加载
+
+只要你改了：
+
+```text
+/etc/systemd/system/r1-show-control.service
 ```
 
-#### **休眠**
-```bash
-sudo systemctl hibernate
-```
+就需要执行：
 
----
-
-## 🐛 常见问题排查
-
-### **问题1：服务启动失败**
-```bash
-# 1. 查看服务状态
-sudo systemctl status r1-show.service
-
-# 2. 查看详细日志
-sudo journalctl -u r1-show.service -n 50
-
-# 3. 检查服务文件语法
-sudo systemd-analyze verify /etc/systemd/system/r1-show.service
-```
-
-### **问题2：程序路径错误**
-**错误示例：**
-```
-ExecStart=/usr/local/bin/r1_show_control
-```
-**排查：**
-```bash
-# 检查文件是否存在
-ls -l /usr/local/bin/r1_show_control
-
-# 检查是否有执行权限
-chmod +x /usr/local/bin/r1_show_control
-```
-
-### **问题3：服务启动太快，网络还没准备好**
-**解决方法：**
-```ini
-[Unit]
-After=network-online.target
-Wants=network-online.target
-```
-
-### **问题4：查看依赖关系**
-```bash
-sudo systemctl list-dependencies r1-show.service
-```
-
----
-
-## 📋 实用案例
-
-### **案例1：创建自定义服务**
-
-#### **步骤1：创建服务文件**
-```bash
-sudo nano /etc/systemd/system/my-app.service
-```
-
-#### **步骤2：写入配置**
-```ini
-[Unit]
-Description=My Custom Application
-After=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/my-app
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-#### **步骤3：重新加载配置**
 ```bash
 sudo systemctl daemon-reload
 ```
 
-#### **步骤4：启用并启动服务**
+然后再重启服务：
+
 ```bash
-sudo systemctl enable my-app.service
-sudo systemctl start my-app.service
+sudo systemctl restart r1-show-control.service
 ```
 
-#### **步骤5：查看状态**
+`daemon-reload` 只让 systemd 重新读取服务配置，不会自动重启你的程序。
+
+## 五、查看日志
+
+### 1. 查看程序自己的日志文件
+
+当前部署脚本会把程序输出重定向到：
+
+```text
+/var/log/r1_show_control.log
+```
+
+查看最近 50 行：
+
 ```bash
-sudo systemctl status my-app.service
+tail -n 50 /var/log/r1_show_control.log
 ```
 
----
+实时查看：
 
-### **案例2：延迟启动服务**
-
-如果服务需要在其他服务启动后 30 秒再启动：
-
-```ini
-[Service]
-ExecStartPre=/bin/sleep 30
-ExecStart=/usr/local/bin/my-app
-```
-
----
-
-### **案例3：服务依赖多个条件**
-
-```ini
-[Unit]
-Description=My App
-After=network-online.target mysql.service redis.service
-Requires=mysql.service redis.service
-```
-
----
-
-## 🔍 高级技巧
-
-### **1. 查看服务启动时间**
 ```bash
-sudo systemd-analyze blame | head -20
+tail -f /var/log/r1_show_control.log
 ```
 
-### **2. 查看启动耗时**
+退出实时查看按：
+
+```text
+Ctrl+C
+```
+
+### 2. 查看 systemd 日志
+
+最近 50 行：
+
 ```bash
-sudo systemd-analyze time
+journalctl -u r1-show-control.service -n 50
 ```
 
-### **3. 调试服务启动**
+实时查看：
+
 ```bash
-sudo systemctl start r1-show.service
-sudo journalctl -u r1-show.service -f
+journalctl -u r1-show-control.service -f
 ```
 
-### **4. 临时禁用服务**
+只看今天：
+
 ```bash
-sudo systemctl mask r1-show.service
+journalctl -u r1-show-control.service --since today
 ```
-**恢复：**
+
+如果没有权限：
+
 ```bash
-sudo systemctl unmask r1-show.service
+sudo journalctl -u r1-show-control.service -f
 ```
 
-### **5. 设置环境变量**
-```ini
-[Service]
-Environment="PATH=/usr/local/bin:/usr/bin"
-Environment="MY_VAR=my_value"
+### 3. 为什么会有旧日志残留
+
+你可能会在 `/var/log/` 看到：
+
+```text
+r1_show_control.log
+r1_show_control_dual.log
+r1_showroom.log
 ```
 
-或者从文件读取：
-```ini
-[Service]
-EnvironmentFile=/etc/my-app/env.conf
-```
+这不一定代表这些服务还在运行。
 
----
+原因是：
 
-## 📊 日志文件位置
+- 日志文件是普通文件，服务删了以后它不会自动消失。
+- 旧程序曾经写过日志，文件会一直留在 `/var/log/`。
+- 如果两个服务或两个脚本都把输出写到同一个地方，看起来内容可能很像。
 
-| 日志类型 | 路径 | 说明 |
-|---------|------|------|
-| **systemd 日志** | `/var/log/journal/` | 二进制格式，用 `journalctl` 查看 |
-| **系统日志** | `/var/log/syslog` 或 `/var/log/messages` | 系统级日志 |
-| **服务自定义日志** | 由 `ExecStart` 重定向决定 | 例如 `/var/log/r1_show_control.log` |
+判断服务是否真的还在运行，要看：
 
----
-
-## 🎯 快速参考表
-
-### **服务管理**
-| 命令 | 说明 |
-|------|------|
-| `systemctl start <服务>` | 启动服务 |
-| `systemctl stop <服务>` | 停止服务 |
-| `systemctl restart <服务>` | 重启服务 |
-| `systemctl reload <服务>` | 重新加载配置 |
-| `systemctl status <服务>` | 查看状态 |
-| `systemctl enable <服务>` | 启用开机自启动 |
-| `systemctl disable <服务>` | 禁用开机自启动 |
-
-### **日志查看**
-| 命令 | 说明 |
-|------|------|
-| `journalctl -u <服务>` | 查看服务日志 |
-| `journalctl -u <服务> -f` | 实时查看日志 |
-| `journalctl -u <服务> -n 50` | 查看最近50行 |
-| `journalctl --since today` | 查看今天日志 |
-
----
-
-## ✅ 总结
-
-**systemd 的核心价值：**
-- ✅ 自动化管理（开机启动、崩溃重启）
-- ✅ 统一接口（所有服务用同一套命令）
-- ✅ 强大日志（journalctl 集中管理）
-- ✅ 依赖管理（控制启动顺序）
-
-**记住这5个命令就能应付90%的场景：**
 ```bash
-sudo systemctl status <服务>    # 查看状态
-sudo systemctl restart <服务>   # 重启服务
-sudo journalctl -u <服务> -f   # 查看实时日志
-sudo systemctl enable <服务>    # 启用开机启动
-sudo systemctl daemon-reload    # 重新加载配置
+systemctl list-units --type=service --all 'r1*'
+ps aux | grep '[r]1'
 ```
 
----
+不要只看 `/var/log/` 里有没有日志文件。
 
-**文档版本：** 1.0  
-**更新日期：** 2026-05-12  
-**适用系统：** Ubuntu 16.04+, Debian 8+, CentOS 7+
+## 六、排查常用流程
+
+### 情况 1：机器人开机后迎宾程序没启动
+
+按顺序查：
+
+```bash
+systemctl status r1-show-control.service
+```
+
+如果没运行，再看是否开机自启：
+
+```bash
+systemctl is-enabled r1-show-control.service
+```
+
+如果输出 `disabled`，启用：
+
+```bash
+sudo systemctl enable r1-show-control.service
+sudo systemctl start r1-show-control.service
+```
+
+### 情况 2：服务启动失败
+
+先看状态：
+
+```bash
+systemctl status r1-show-control.service
+```
+
+再看 systemd 日志：
+
+```bash
+journalctl -u r1-show-control.service -n 80
+```
+
+再看程序日志：
+
+```bash
+tail -n 80 /var/log/r1_show_control.log
+```
+
+常见原因：
+
+- `/usr/local/bin/r1_show_control` 不存在。
+- 可执行文件没有权限。
+- DDS 网口写错，比如应该是 `eth10`。
+- 程序依赖的 SDK 库路径不对。
+- 语音文件或资源路径不存在。
+
+### 情况 3：修改了服务文件但没生效
+
+服务文件改完后必须：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart r1-show-control.service
+```
+
+只保存文件是不够的。
+
+### 情况 4：怀疑旧服务还在运行
+
+查看所有 R1 服务：
+
+```bash
+systemctl list-units --type=service --all 'r1*'
+systemctl list-unit-files 'r1*'
+```
+
+查看 R1 相关进程：
+
+```bash
+ps aux | grep '[r]1'
+```
+
+如果发现旧服务还在，比如：
+
+```text
+r1-showroom.service
+r1-canteen.service
+```
+
+先停掉：
+
+```bash
+sudo systemctl stop r1-showroom.service
+sudo systemctl disable r1-showroom.service
+```
+
+确认无误后，再考虑删除对应服务文件。
+
+## 七、清理旧服务和旧日志
+
+### 1. 停止并禁用旧服务
+
+以旧的 `r1-showroom.service` 为例：
+
+```bash
+sudo systemctl stop r1-showroom.service
+sudo systemctl disable r1-showroom.service
+```
+
+### 2. 删除旧服务文件
+
+确认这个服务已经不用了，再删除：
+
+```bash
+sudo rm -f /etc/systemd/system/r1-showroom.service
+sudo systemctl daemon-reload
+```
+
+不要乱用：
+
+```bash
+sudo rm -f /etc/systemd/system/*.service
+```
+
+这会删除大量系统服务文件，非常危险。
+
+### 3. 删除旧日志
+
+删除日志只会删除文件，不会停止服务：
+
+```bash
+sudo rm -f /var/log/r1_show_control_dual.log
+sudo rm -f /var/log/r1_showroom.log
+```
+
+如果服务还在运行，它可能会再次生成日志文件。
+
+所以正确顺序是：
+
+```text
+先停服务 -> 再禁用自启 -> 再删服务文件 -> daemon-reload -> 再删旧日志
+```
+
+## 八、当前项目最常用命令速查
+
+### 查看类
+
+```bash
+systemctl list-units --type=service --all 'r1*'
+systemctl list-unit-files 'r1*'
+systemctl status r1-show-control.service
+ps aux | grep '[r]1'
+tail -f /var/log/r1_show_control.log
+journalctl -u r1-show-control.service -f
+```
+
+### 操作类
+
+```bash
+sudo systemctl start r1-show-control.service
+sudo systemctl stop r1-show-control.service
+sudo systemctl restart r1-show-control.service
+sudo systemctl enable r1-show-control.service
+sudo systemctl disable r1-show-control.service
+sudo systemctl daemon-reload
+```
+
+### 手部服务常用启动命令
+
+如果机器人重启后灵巧手不动，常见原因是 `brainco_hand_server` 没启动。
+
+手动启动示例：
+
+```bash
+cd ~/brainco_hand_service/bin
+sudo ./brainco_hand_server --network_interface eth10
+```
+
+这个目前通常是手动运行，不一定已经做成 systemd 服务。
+
+## 九、高风险命令提醒
+
+### 1. sudo reboot
+
+```bash
+sudo reboot
+```
+
+会直接重启机器人。实机测试时要确认机器人处于安全姿态。
+
+### 2. sudo rm
+
+```bash
+sudo rm -f 文件路径
+```
+
+管理员权限删除文件，删错了不一定能恢复。
+
+尤其不要随便执行：
+
+```bash
+sudo rm -rf /
+sudo rm -rf /*
+sudo rm -f /etc/systemd/system/*.service
+```
+
+### 3. stop 和 disable 不是一回事
+
+```bash
+sudo systemctl stop r1-show-control.service
+```
+
+表示现在停。
+
+```bash
+sudo systemctl disable r1-show-control.service
+```
+
+表示下次开机不要自动启动。
+
+如果你只执行 `stop`，机器人重启后服务可能又会起来。
+
+### 4. 删除日志不是解决服务问题
+
+删除：
+
+```bash
+sudo rm -f /var/log/r1_show_control.log
+```
+
+只会删日志文件，不会停止程序，也不会修复程序。
+
+排查服务问题优先看：
+
+```bash
+systemctl status r1-show-control.service
+journalctl -u r1-show-control.service -n 50
+ps aux | grep '[r]1'
+```
+
+## 十、推荐日常排查顺序
+
+如果你不确定 R1 当前到底跑了什么，按这个顺序来：
+
+```bash
+systemctl list-units --type=service --all 'r1*'
+systemctl list-unit-files 'r1*'
+systemctl status r1-show-control.service
+ps aux | grep '[r]1'
+tail -n 50 /var/log/r1_show_control.log
+journalctl -u r1-show-control.service -n 50
+```
+
+如果改了服务文件：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart r1-show-control.service
+systemctl status r1-show-control.service
+```
+
+如果只是重新部署了可执行文件：
+
+```bash
+sudo systemctl restart r1-show-control.service
+tail -f /var/log/r1_show_control.log
+```
+
+## 版本记录
+
+- 更新时间：2026-05-26
+- 适用项目：`D:\Unitree-R1-迎宾`
+- 当前主服务：`r1-show-control.service`

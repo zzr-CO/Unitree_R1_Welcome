@@ -8,15 +8,15 @@ echo "=== 开始清理 r1_show_control 所有痕迹 ==="
 
 # 1. 停止并禁用服务
 echo "[1/6] 停止服务..."
-sudo systemctl stop r1-show 2>/dev/null
-sudo systemctl disable r1-show 2>/dev/null
+sudo systemctl stop r1-show-control 2>/dev/null
+sudo systemctl disable r1-show-control 2>/dev/null
 echo "  ✓ 服务已停止并禁用"
 
 # 2. 删除 systemd 服务文件
 echo "[2/6] 删除服务文件..."
-sudo rm -f /etc/systemd/system/r1-show.service
-echo "  ✓ 已删除: /etc/systemd/system/r1-show.service"
-
+sudo rm -f /etc/systemd/system/r1-show-control.service
+echo "  ✓ 已删除: /etc/systemd/system/r1-show-control.service"
+    
 # 3. 删除可执行文件
 echo "[3/6] 删除可执行文件..."
 sudo rm -f /usr/local/bin/r1_show_control
@@ -31,8 +31,8 @@ echo "  ✓ 已删除: /var/log/r1_show_control.log*"
 
 # 5. 删除日志轮转配置
 echo "[5/6] 删除日志轮转配置..."
-sudo rm -f /etc/logrotate.d/r1-show
-echo "  ✓ 已删除: /etc/logrotate.d/r1-show"
+sudo rm -f /etc/logrotate.d/r1-show-control
+echo "  ✓ 已删除: /etc/logrotate.d/r1-show-control"
 
 # 6. 重载 systemd 并验证
 echo "[6/6] 重载 systemd..."
@@ -42,7 +42,7 @@ echo ""
 echo "=== 清理完成，开始验证 ==="
 
 # 验证
-if [ -f /etc/systemd/system/r1-show.service ]; then
+if [ -f /etc/systemd/system/r1-show-control.service ]; then
     echo "✗ 服务文件仍存在"
 else
     echo "✓ 服务文件已删除"
@@ -60,7 +60,7 @@ else
     echo "✓ 日志文件已删除"
 fi
 
-if [ -f /etc/logrotate.d/r1-show ]; then
+if [ -f /etc/logrotate.d/r1-show-control ]; then
     echo "✗ 日志轮转配置仍存在"
 else
     echo "✓ 日志轮转配置已删除"

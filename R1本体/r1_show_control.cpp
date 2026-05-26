@@ -8,7 +8,7 @@
  *   ← + A   → 话术1 + 奥特曼光线(24)（单次）
  *   ← + B   → 话术2 + 脸部挥手(25) + 右手比耶（单次）
  *   ← + X   → 话术3 + 手放胸口鞠躬(33)（单次）
- *   ← + Y   → 话术4 + 右手举起示意(23)（单次）
+ *   ← + Y   → 话术4 + 高举挥手(26)（单次）
  *   ↓ + A   → 四场景循环模式 开始/停止（间隔%ds）
  *   SELECT  → 切换音色版本（原始版 ↔ 东北话版）
  *
@@ -125,7 +125,7 @@ static const Scene SCENES[] = {
     {"morning_01.pcm", "morning_01_xiaobei.pcm", 24, "奥特曼光线",    "←+A"},
     {"morning_02.pcm", "morning_02_xiaobei.pcm", 25, "脸部挥手",      "←+B"},
     {"morning_03.pcm", "morning_03_xiaobei.pcm", 33, "手放胸口鞠躬",  "←+X"},
-    {"morning_04.pcm", "morning_04_xiaobei.pcm", 23, "右手举起示意",  "←+Y"},
+    {"morning_04.pcm", "morning_04_xiaobei.pcm", 26, "高举挥手",      "←+Y"},
 };
 static constexpr int SCENE_COUNT = sizeof(SCENES) / sizeof(SCENES[0]);
 /* ===================================================== */
