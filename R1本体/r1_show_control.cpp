@@ -31,9 +31,10 @@
  *   ./r1_show_control eth10
  *
  * 右手灵巧手说明：
- *   - 程序会向 rt/brainco/right/cmd 持续发布右手指令
- *   - ←+B 场景会切换为比耶姿态 [1,1,0,0,1,1]
- *   - 场景结束和程序退出时会发送张开复位 [0,0,0,0,0,0]
+ *   - 程序只在需要手势或复位时，向 rt/brainco/right/cmd 短时间发布右手指令
+ *   - ←+B 场景会发布比耶姿态 [1,1,0,0,1,1]
+ *   - ←+B 场景结束和程序退出时会发布张开复位 [0,0,0,0,0,0]
+ *   - 平时不持续发布右手指令，避免和独立灵巧手测试程序抢控制权
  *   - 该功能依赖 brainco_hand_server 已启动并成功绑定右手
  *     启动命令：
  *       cd ~/brainco_hand_service/bin
@@ -146,14 +147,12 @@ using HandCmds = unitree_go::msg::dds_::MotorCmds_;
 using HandPose = std::array<float, 6>;
 
 static constexpr float HAND_FINGER_SPEED = 1.0f;
+static constexpr int RIGHT_HAND_PUBLISH_INTERVAL_MS = 100;
+static constexpr int RIGHT_HAND_PUBLISH_DURATION_MS = 1000;
 static constexpr int SCENE_V_HAND_ID = 1;  // 场景2：←+B 脸部挥手
 
 static const HandPose HAND_OPEN_POSE = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
 static const HandPose HAND_V_POSE    = {1.f, 1.f, 0.f, 0.f, 1.f, 1.f};
-
-static std::atomic<bool> g_hand_publish_running{true};
-static std::mutex g_hand_pose_mutex;
-static HandPose g_current_hand_pose = HAND_OPEN_POSE;
 
 static void SetHandPoseMsg(HandCmds& msg, const HandPose& pose) {
     msg.cmds().resize(6);
@@ -163,30 +162,17 @@ static void SetHandPoseMsg(HandCmds& msg, const HandPose& pose) {
     }
 }
 
-static void SetRightHandPose(const HandPose& pose) {
-    std::lock_guard<std::mutex> lk(g_hand_pose_mutex);
-    g_current_hand_pose = pose;
-}
-
-static HandPose GetRightHandPose() {
-    std::lock_guard<std::mutex> lk(g_hand_pose_mutex);
-    return g_current_hand_pose;
-}
-
-static void RightHandPublishLoop(unitree::robot::ChannelPublisher<HandCmds>* publisher) {
+static void PublishRightHandPose(unitree::robot::ChannelPublisher<HandCmds>& publisher,
+                                 const HandPose& pose,
+                                 std::chrono::milliseconds duration) {
     HandCmds msg;
-    msg.cmds().resize(6);
-
-    while (g_hand_publish_running.load()) {
-        SetHandPoseMsg(msg, GetRightHandPose());
-        publisher->Write(msg, 0);
-        std::this_thread::sleep_for(100ms);
+    SetHandPoseMsg(msg, pose);
+    const int repeat_count = std::max(1, static_cast<int>(
+        duration.count() / RIGHT_HAND_PUBLISH_INTERVAL_MS));
+    for (int i = 0; i < repeat_count; ++i) {
+        publisher.Write(msg, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(RIGHT_HAND_PUBLISH_INTERVAL_MS));
     }
-}
-
-static void HoldRightHandPose(const HandPose& pose, std::chrono::milliseconds duration) {
-    SetRightHandPose(pose);
-    std::this_thread::sleep_for(duration);
 }
 /* ============================================================= */
 
@@ -255,6 +241,7 @@ bool LoadPcm(const std::string& path, std::vector<uint8_t>& out, double& dur) {
 void PlayScene(int id,
                std::shared_ptr<unitree::robot::g1::AudioClient> audio,
                std::shared_ptr<unitree::robot::g1::G1ArmActionClient> arm,
+               unitree::robot::ChannelPublisher<HandCmds>& right_hand_pub,
                bool arm_ok)
 {
     if (id < 0 || id >= SCENE_COUNT) return;
@@ -277,10 +264,9 @@ void PlayScene(int id,
 
     const bool use_v_hand = (id == SCENE_V_HAND_ID);
     if (use_v_hand) {
-        LOG("  右手灵巧手切换为比耶姿态");
-        SetRightHandPose(HAND_V_POSE);
-    } else {
-        SetRightHandPose(HAND_OPEN_POSE);
+        LOG("  发布右手比耶姿态");
+        PublishRightHandPose(right_hand_pub, HAND_V_POSE,
+                             std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
     }
 
     /* 绿灯 */
@@ -328,10 +314,9 @@ void PlayScene(int id,
     audio->PlayStop("r1_show");
     if (arm_ok) arm->ExecuteAction(ACT_RELEASE);
     if (use_v_hand) {
-        LOG("  右手灵巧手张开复位");
-        HoldRightHandPose(HAND_OPEN_POSE, 1000ms);
-    } else {
-        SetRightHandPose(HAND_OPEN_POSE);
+        LOG("  发布右手张开复位");
+        PublishRightHandPose(right_hand_pub, HAND_OPEN_POSE,
+                             std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
     }
 
     LOG("  ✓ 场景完成");
@@ -414,9 +399,7 @@ int main(int argc, char const* argv[]) {
     /* 右手灵巧手 DDS Publisher */
     unitree::robot::ChannelPublisher<HandCmds> right_hand_pub(TOPIC_RIGHT_HAND);
     right_hand_pub.InitChannel();
-    SetRightHandPose(HAND_OPEN_POSE);
-    std::thread right_hand_thread(RightHandPublishLoop, &right_hand_pub);
-    LOG("右手灵巧手 DDS 发布就绪: " + std::string(TOPIC_RIGHT_HAND));
+    LOG("右手灵巧手 DDS 按需发布就绪: " + std::string(TOPIC_RIGHT_HAND));
 
     /* PCM - 加载两套音频 */
     LOG("加载 PCM 音频（双音色版本）...");
@@ -510,7 +493,7 @@ int main(int argc, char const* argv[]) {
 
             if (scene_id >= 0 && !g_busy.load() && !g_pcm_data[scene_id][g_voice_version.load()].empty()) {
                 g_busy.store(true);
-                PlayScene(scene_id, audio, arm, arm_ok);
+                PlayScene(scene_id, audio, arm, right_hand_pub, arm_ok);
                 g_busy.store(false);
                 std::this_thread::sleep_for(COOLDOWN_MS * 1ms);
             }
@@ -521,7 +504,7 @@ int main(int argc, char const* argv[]) {
             g_busy.store(true);
             for (int i = 0; i < SCENE_COUNT && g_loop_on.load() && g_running.load(); ++i) {
                 if (g_pcm_data[i][g_voice_version.load()].empty()) continue;
-                PlayScene(i, audio, arm, arm_ok);
+                PlayScene(i, audio, arm, right_hand_pub, arm_ok);
 
                 /* 间隔（期间检查停止按键） */
                 if (i < SCENE_COUNT - 1 && g_loop_on.load()) {
@@ -558,11 +541,9 @@ int main(int argc, char const* argv[]) {
     /* 退出 */
     LOG("安全退出中...");
     if (arm_ok) arm->ExecuteAction(ACT_RELEASE);
-    HoldRightHandPose(HAND_OPEN_POSE, 1000ms);
-    g_hand_publish_running.store(false);
-    if (right_hand_thread.joinable()) {
-        right_hand_thread.join();
-    }
+    LOG("发布右手张开复位");
+    PublishRightHandPose(right_hand_pub, HAND_OPEN_POSE,
+                         std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
     audio->LedControl(0, 0, 0);
     LOG("程序已退出");
     return 0;
