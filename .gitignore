@@ -10,11 +10,12 @@ SDK_vs_ROS_关系详解.md
 Linux常用命令_R1项目入门.md
 手动配置R1服务.md
 AGENTS.md
+# R1灵巧手项目讲解.md
 # 灵巧手 SDK header (不上传)
 灵巧手/include/
 
 # 灵巧手实验文件（本地测试，不上传）
-灵巧手/
+# 灵巧手/
 
 # System files
 .DS_Store
