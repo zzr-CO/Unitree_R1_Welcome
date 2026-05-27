@@ -21,12 +21,6 @@
 
 ## 2. 文件位置
 
-### Windows 端
-
-```
-D:\unitree\deploy_r1.sh
-```
-
 ### 机器人端
 
 ```
@@ -154,20 +148,8 @@ sudo systemctl status r1-show
 
 ---
 
-## 5. 以后更新程序
+## 5. 脚本智能行为
 
-### 工作流程
-
-1. 在 Windows 上修改 `D:\unitree\r1_show_control.cpp`
-2. 用 MobaXterm 上传到机器人 `/home/unitree/unitree_sdk2-1.0/`
-3. 运行脚本：
-
-```bash
-cd /home/unitree/unitree_sdk2-1.0/
-./deploy_r1.sh
-```
-
-### 脚本智能行为
 
 | 场景 | 脚本行为 |
 |------|----------|
@@ -284,141 +266,5 @@ sudo systemctl enable r1-show
 ```bash
 sudo logrotate /etc/logrotate.d/r1-show
 ```
-
----
-
-## 7. 完整工作流总结
-
-### 首次部署（设置开机自启动）
-
-```bash
-# 1. 上传文件
-#    r1_show_control.cpp → /home/unitree/unitree_sdk2-1.0/
-#    deploy_r1.sh        → /home/unitree/unitree_sdk2-1.0/
-
-# 2. 赋予权限
-chmod +x /home/unitree/unitree_sdk2-1.0/deploy_r1.sh
-
-# 3. 运行脚本
-cd /home/unitree/unitree_sdk2-1.0/
-./deploy_r1.sh
-
-# 4. 验证
-sudo systemctl status r1-show
-# 应该显示：Active: active (running)
-
-# 5. 测试开机自启
-sudo reboot
-# 重启后直接按遥控器 ←+A 测试
-```
-
-### 以后更新程序
-
-```bash
-# 1. 修改 Windows 上的 r1_show_control.cpp
-
-# 2. 上传到机器人
-#    r1_show_control.cpp → /home/unitree/unitree_sdk2-1.0/
-
-# 3. 运行脚本
-cd /home/unitree/unitree_sdk2-1.0/
-./deploy_r1.sh
-
-# 4. 验证
-sudo systemctl status r1-show
-```
-
----
-
-## 8. 技术细节
-
-### 脚本自动检测目录原理
-
-```bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-```
-
-这行代码会：
-1. 获取脚本所在目录的绝对路径
-2. 不管你把脚本放哪，都能正确找到 cpp 文件
-
-### systemd 服务文件内容
-
-脚本自动创建 `/etc/systemd/system/r1-show.service`：
-
-```ini
-[Unit]
-Description=Unitree R1 Showroom Control
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/bin/bash -c '/usr/local/bin/r1_show_control eth10 >> /var/log/r1_show_control.log 2>&1'
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**关键点**：
-- `Restart=always`：程序崩溃会自动重启
-- `WantedBy=multi-user.target`：开机自启动
-- `StandardOutput=journal`：日志同时写入 systemd journal
-- `ExecStart` 中的 `>> /var/log/r1_show_control.log 2>&1`：程序输出同时写入日志文件
-- **日志文件位置**：`/var/log/r1_show_control.log`
-- **日志轮转配置**：`/etc/logrotate.d/r1-show`（保留7天，自动压缩）
-
-### 程序日志功能
-
-程序（`r1_show_control.cpp`）内置日志功能：
-- 使用 `g_log_file` 全局变量写入日志文件
-- 日志宏：`LOG_INFO()`, `LOG_WARN()`, `LOG_ERROR()`
-- 日志格式：`[时间戳] [级别] 消息内容`
-- 日志文件同时输出到 stdout（控制台）和 `/var/log/r1_show_control.log`
-
-**查看日志示例**：
-
-```bash
-# 实时查看日志
-tail -f /var/log/r1_show_control.log
-
-# 查看最后20行
-tail -n 20 /var/log/r1_show_control.log
-
-# 只看错误信息
-grep -i "error\|warn" /var/log/r1_show_control.log
-```
-
----
-
-## 9. 文件清单
-
-| 文件 | 位置 | 说明 |
-|------|------|------|
-| `deploy_r1.sh` | Windows: `D:\unitree\` | 部署脚本（Windows端） |
-| `deploy_r1.sh` | 机器人: `/home/unitree/unitree_sdk2-1.0/` | 部署脚本（机器人端） |
-| `r1_show_control.cpp` | Windows: `D:\unitree\` | 主程序源码 |
-| `r1_show_control.cpp` | 机器人: `/home/unitree/unitree_sdk2-1.0/` | 编译用的源码 |
-| `r1_show_control` | 机器人: `/usr/local/bin/` | 编译后的可执行文件 |
-| `r1-show.service` | 机器人: `/etc/systemd/system/` | systemd 服务文件 |
-| `r1_show_control.log` | 机器人: `/var/log/` | **程序日志文件**（新增） |
-| `r1-show` | 机器人: `/etc/logrotate.d/` | **日志轮转配置**（新增） |
-
----
-
-## 10. 注意事项
-
-1. **脚本和cpp放在同一目录**，避免路径问题
-2. **首次运行后会创建systemd服务**，以后运行只更新程序，不重复创建服务
-3. **修改cpp文件名后**，需要同步修改脚本第24行 `SOURCE_FILE`
-4. **网口名确认**：用 `ip addr` 查看机器人网口名，修改脚本第37行
-5. **日志查看**：
-   - 查看程序日志：`tail -f /var/log/r1_show_control.log`（推荐）
-   - 查看 systemd 日志：`sudo journalctl -u r1-show -f`
-6. **日志管理**：日志文件由 `logrotate` 自动管理，保留最近7天，配置文件：`/etc/logrotate.d/r1-show`
 
 ---
