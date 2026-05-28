@@ -8,7 +8,7 @@
  *   ← + A   → 话术1 + 奥特曼光线(24)（单次）
  *   ← + B   → 话术2 + 脸部挥手(25) + 右手比耶（单次）
  *   ← + X   → 话术3 + 手放胸口鞠躬(33)（单次）
- *   ← + Y   → 话术4 + 高举挥手(26)（单次）
+ *   ← + Y   → 话术4 + 点赞/肯定(19) + 双手点赞（单次）
  *   ↓ + A   → 四场景循环模式 开始/停止（间隔%ds）
  *   SELECT  → 切换音色版本（原始版 ↔ 东北话版）
  *
@@ -32,8 +32,9 @@
  *
  * 右手灵巧手说明：
  *   - 程序只在需要手势或复位时，向 rt/brainco/right/cmd 短时间发布右手指令
- *   - ←+B 场景会发布比耶姿态 [1,1,0,0,1,1]
- *   - ←+B 场景结束和程序退出时会发布张开复位 [0,0,0,0,0,0]
+ *   - 每个场景可配置动作前、动作中、动作后的灵巧手手势
+ *   - ←+Y 场景会同时向左右手发布点赞姿态
+ *   - 场景结束和程序退出时会发布张开复位 [0,0,0,0,0,0]
  *   - 平时不持续发布右手指令，避免和独立灵巧手测试程序抢控制权
  *   - 该功能依赖 brainco_hand_server 已启动并成功绑定右手
  *     启动命令：
@@ -68,6 +69,7 @@
 #include "unitree/robot/g1/audio/g1_audio_client.hpp"
 
 #define TOPIC_JOYSTICK "rt/wirelesscontroller"
+#define TOPIC_LEFT_HAND "rt/brainco/left/cmd"
 #define TOPIC_RIGHT_HAND "rt/brainco/right/cmd"
 
 using namespace std::chrono_literals;
@@ -111,26 +113,6 @@ static const char* VOICE_NAMES[] = {
 };
 /* ===================================================== */
 
-/* ==================== 4 个场景 ==================== */
-static constexpr const char* PCM_DIR = "/home/unitree/voice_pack/audio_show/";
-
-struct Scene {
-    const char* pcm_file_default;   // 原始音色
-    const char* pcm_file_xiaobei;   // 东北话音色
-    int32_t     action_id;
-    const char* action_name;
-    const char* key_name;
-};
-
-static const Scene SCENES[] = {
-    {"morning_01.pcm", "morning_01_xiaobei.pcm", 24, "奥特曼光线",    "←+A"},
-    {"morning_02.pcm", "morning_02_xiaobei.pcm", 25, "脸部挥手",      "←+B"},
-    {"morning_03.pcm", "morning_03_xiaobei.pcm", 33, "手放胸口鞠躬",  "←+X"},
-    {"morning_04.pcm", "morning_04_xiaobei.pcm", 26, "高举挥手",      "←+Y"},
-};
-static constexpr int SCENE_COUNT = sizeof(SCENES) / sizeof(SCENES[0]);
-/* ===================================================== */
-
 static constexpr uint8_t VOLUME       = 100;
 static constexpr int     ACT_RELEASE  = 99;
 static constexpr int     COOLDOWN_MS  = 400;
@@ -149,10 +131,50 @@ using HandPose = std::array<float, 6>;
 static constexpr float HAND_FINGER_SPEED = 1.0f;
 static constexpr int RIGHT_HAND_PUBLISH_INTERVAL_MS = 100;
 static constexpr int RIGHT_HAND_PUBLISH_DURATION_MS = 1000;
-static constexpr int SCENE_V_HAND_ID = 1;  // 场景2：←+B 脸部挥手
+static constexpr int RIGHT_HAND_PREPARE_MS = 500;
 
-static const HandPose HAND_OPEN_POSE = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
-static const HandPose HAND_V_POSE    = {1.f, 1.f, 0.f, 0.f, 1.f, 1.f};
+enum class HandGesture {
+    None,
+    Open,
+    Relaxed,
+    VSign,
+    ThumbUp,
+    OK,
+    Point,
+};
+
+static const HandPose HAND_OPEN_POSE    = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+static const HandPose HAND_RELAXED_POSE = {0.2f, 0.2f, 0.25f, 0.25f, 0.25f, 0.25f};
+static const HandPose HAND_V_POSE       = {1.f, 1.f, 0.f, 0.f, 1.f, 1.f};
+static const HandPose HAND_THUMB_UP_POSE = {0.f, 0.f, 1.f, 1.f, 1.f, 1.f};
+static const HandPose HAND_OK_POSE      = {0.7f, 0.7f, 0.65f, 0.f, 0.f, 0.f};
+static const HandPose HAND_POINT_POSE   = {1.f, 1.f, 0.f, 1.f, 1.f, 1.f};
+
+static const char* HandGestureName(HandGesture gesture) {
+    switch (gesture) {
+        case HandGesture::Open:    return "张开";
+        case HandGesture::Relaxed: return "轻松自然手";
+        case HandGesture::VSign:   return "比耶";
+        case HandGesture::ThumbUp: return "点赞";
+        case HandGesture::OK:      return "OK";
+        case HandGesture::Point:   return "竖起食指";
+        case HandGesture::None:    return "无";
+    }
+    return "未知";
+}
+
+static const HandPose* GetHandPose(HandGesture gesture) {
+    switch (gesture) {
+        case HandGesture::Open:    return &HAND_OPEN_POSE;
+        case HandGesture::Relaxed: return &HAND_RELAXED_POSE;
+        case HandGesture::VSign:   return &HAND_V_POSE;
+        case HandGesture::ThumbUp: return &HAND_THUMB_UP_POSE;
+        case HandGesture::OK:      return &HAND_OK_POSE;
+        case HandGesture::Point:   return &HAND_POINT_POSE;
+        case HandGesture::None:    return nullptr;
+    }
+    return nullptr;
+}
 
 static void SetHandPoseMsg(HandCmds& msg, const HandPose& pose) {
     msg.cmds().resize(6);
@@ -174,7 +196,89 @@ static void PublishRightHandPose(unitree::robot::ChannelPublisher<HandCmds>& pub
         std::this_thread::sleep_for(std::chrono::milliseconds(RIGHT_HAND_PUBLISH_INTERVAL_MS));
     }
 }
+
+static bool PublishHandGesture(unitree::robot::ChannelPublisher<HandCmds>& publisher,
+                               const char* hand_name,
+                               HandGesture gesture,
+                               std::chrono::milliseconds duration) {
+    const HandPose* pose = GetHandPose(gesture);
+    if (!pose) return false;
+    LOG("  发布" + std::string(hand_name) + "手势: " + std::string(HandGestureName(gesture))
+        + " (" + std::to_string(duration.count()) + "ms)");
+    PublishRightHandPose(publisher, *pose, duration);
+    return true;
+}
+
+static int PublishHandGestures(unitree::robot::ChannelPublisher<HandCmds>& left_publisher,
+                               unitree::robot::ChannelPublisher<HandCmds>& right_publisher,
+                               HandGesture left_gesture,
+                               HandGesture right_gesture,
+                               std::chrono::milliseconds duration) {
+    const HandPose* left_pose = GetHandPose(left_gesture);
+    const HandPose* right_pose = GetHandPose(right_gesture);
+    if (!left_pose && !right_pose) return 0;
+
+    HandCmds left_msg;
+    HandCmds right_msg;
+    if (left_pose) SetHandPoseMsg(left_msg, *left_pose);
+    if (right_pose) SetHandPoseMsg(right_msg, *right_pose);
+
+    std::string log = "  发布灵巧手手势: ";
+    if (left_pose) log += "左手=" + std::string(HandGestureName(left_gesture)) + " ";
+    if (right_pose) log += "右手=" + std::string(HandGestureName(right_gesture)) + " ";
+    log += "(" + std::to_string(duration.count()) + "ms)";
+    LOG(log);
+
+    const int repeat_count = std::max(1, static_cast<int>(
+        duration.count() / RIGHT_HAND_PUBLISH_INTERVAL_MS));
+    for (int i = 0; i < repeat_count; ++i) {
+        if (left_pose) left_publisher.Write(left_msg, 0);
+        if (right_pose) right_publisher.Write(right_msg, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(RIGHT_HAND_PUBLISH_INTERVAL_MS));
+    }
+
+    int mask = 0;
+    if (left_pose) mask |= 1;
+    if (right_pose) mask |= 2;
+    return mask;
+}
 /* ============================================================= */
+
+/* ==================== 4 个场景 ==================== */
+static constexpr const char* PCM_DIR = "/home/unitree/voice_pack/audio_show/";
+
+struct Scene {
+    const char* pcm_file_default;   // 原始音色
+    const char* pcm_file_xiaobei;   // 东北话音色
+    int32_t     action_id;
+    const char* action_name;
+    const char* key_name;
+    HandGesture start_gesture;      // 场景开始前短暂准备手势
+    HandGesture during_gesture;     // 执行动作时配合手势
+    HandGesture end_gesture;        // 场景结束后的停留手势
+    int         hold_ms;            // 结束手势停留时间
+    HandGesture left_start_gesture; // 左手：场景开始前短暂准备手势
+    HandGesture left_during_gesture;// 左手：执行动作时配合手势
+    HandGesture left_end_gesture;   // 左手：场景结束后的停留手势
+    int         left_hold_ms;       // 左手：结束手势停留时间
+};
+
+static const Scene SCENES[] = {
+    {"morning_01.pcm", "morning_01_xiaobei.pcm", 24, "奥特曼光线",    "←+A",
+     HandGesture::None,    HandGesture::None,    HandGesture::None,       0,
+     HandGesture::None,    HandGesture::None,    HandGesture::None,       0},
+    {"morning_02.pcm", "morning_02_xiaobei.pcm", 25, "脸部挥手",      "←+B",
+     HandGesture::Open,    HandGesture::VSign,   HandGesture::None,       0,
+     HandGesture::None,    HandGesture::None,    HandGesture::None,       0},
+    {"morning_03.pcm", "morning_03_xiaobei.pcm", 33, "手放胸口鞠躬",  "←+X",
+     HandGesture::Relaxed, HandGesture::None,    HandGesture::OK,      1500,
+     HandGesture::None,    HandGesture::None,    HandGesture::None,       0},
+    {"morning_04.pcm", "morning_04_xiaobei.pcm", 19, "点赞/肯定+双手点赞", "←+Y",
+     HandGesture::Open,    HandGesture::ThumbUp, HandGesture::ThumbUp, 1500,
+     HandGesture::Open,    HandGesture::ThumbUp, HandGesture::ThumbUp, 1500},
+};
+static constexpr int SCENE_COUNT = sizeof(SCENES) / sizeof(SCENES[0]);
+/* ===================================================== */
 
 /* ==================== 动作时长表（实测数据，单位秒）==================== */
 static double GetActionDuration(int32_t action_id) {
@@ -241,6 +345,7 @@ bool LoadPcm(const std::string& path, std::vector<uint8_t>& out, double& dur) {
 void PlayScene(int id,
                std::shared_ptr<unitree::robot::g1::AudioClient> audio,
                std::shared_ptr<unitree::robot::g1::G1ArmActionClient> arm,
+               unitree::robot::ChannelPublisher<HandCmds>& left_hand_pub,
                unitree::robot::ChannelPublisher<HandCmds>& right_hand_pub,
                bool arm_ok)
 {
@@ -260,14 +365,20 @@ void PlayScene(int id,
     LOG("▶ 触发 " + std::string(s.key_name) + " [音色=" + VOICE_NAMES[version]
         + ", 音频=" + std::string(pcm_file)
         + ", 动作=" + s.action_name + "(id=" + std::to_string(s.action_id) + ")"
+        + ", 右手=" + std::string(HandGestureName(s.during_gesture))
+        + "/" + HandGestureName(s.end_gesture)
+        + ", 左手=" + HandGestureName(s.left_during_gesture)
+        + "/" + HandGestureName(s.left_end_gesture)
         + ", 时长=" + std::to_string(dur) + "s]");
 
-    const bool use_v_hand = (id == SCENE_V_HAND_ID);
-    if (use_v_hand) {
-        LOG("  发布右手比耶姿态");
-        PublishRightHandPose(right_hand_pub, HAND_V_POSE,
-                             std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
-    }
+    bool used_right_hand = false;
+    bool used_left_hand = false;
+    int hand_mask = PublishHandGestures(
+        left_hand_pub, right_hand_pub,
+        s.left_start_gesture, s.start_gesture,
+        std::chrono::milliseconds(RIGHT_HAND_PREPARE_MS));
+    used_left_hand = used_left_hand || ((hand_mask & 1) != 0);
+    used_right_hand = used_right_hand || ((hand_mask & 2) != 0);
 
     /* 绿灯 */
     audio->LedControl(0, 255, 0);
@@ -289,6 +400,13 @@ void PlayScene(int id,
     }
     LOG("  PCM 发送完毕 (" + std::to_string(total / 1024) + "KB)");
 
+    hand_mask = PublishHandGestures(
+        left_hand_pub, right_hand_pub,
+        s.left_during_gesture, s.during_gesture,
+        std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
+    used_left_hand = used_left_hand || ((hand_mask & 1) != 0);
+    used_right_hand = used_right_hand || ((hand_mask & 2) != 0);
+
     /* 触发手臂动作 */
     if (arm_ok) {
         int ret = arm->ExecuteAction(s.action_id);
@@ -309,16 +427,28 @@ void PlayScene(int id,
         waited += 100;
     }
 
+    const int end_hold_ms = std::max(s.hold_ms, s.left_hold_ms);
+    if (end_hold_ms > 0 && (s.end_gesture != HandGesture::None ||
+                            s.left_end_gesture != HandGesture::None)) {
+        hand_mask = PublishHandGestures(
+            left_hand_pub, right_hand_pub,
+            s.left_end_gesture, s.end_gesture,
+            std::chrono::milliseconds(std::max(RIGHT_HAND_PUBLISH_INTERVAL_MS, end_hold_ms)));
+        used_left_hand = used_left_hand || ((hand_mask & 1) != 0);
+        used_right_hand = used_right_hand || ((hand_mask & 2) != 0);
+    }
+
     /* 结束（先灭灯，再收尾，避免灯还亮着但什么都做不了的错觉） */
     audio->LedControl(0, 0, 0);
     audio->PlayStop("r1_show");
     if (arm_ok) arm->ExecuteAction(ACT_RELEASE);
-    if (use_v_hand) {
-        LOG("  发布右手张开复位");
-        PublishRightHandPose(right_hand_pub, HAND_OPEN_POSE,
-                             std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
+    if (used_right_hand || used_left_hand) {
+        PublishHandGestures(
+            left_hand_pub, right_hand_pub,
+            used_left_hand ? HandGesture::Open : HandGesture::None,
+            used_right_hand ? HandGesture::Open : HandGesture::None,
+            std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
     }
-
     LOG("  ✓ 场景完成");
 }
 
@@ -396,7 +526,11 @@ int main(int argc, char const* argv[]) {
         arm_ok = true;
     } catch (...) { WARN("手臂服务不可用，仅语音"); }
 
-    /* 右手灵巧手 DDS Publisher */
+    /* 灵巧手 DDS Publisher */
+    unitree::robot::ChannelPublisher<HandCmds> left_hand_pub(TOPIC_LEFT_HAND);
+    left_hand_pub.InitChannel();
+    LOG("左手灵巧手 DDS 按需发布就绪: " + std::string(TOPIC_LEFT_HAND));
+
     unitree::robot::ChannelPublisher<HandCmds> right_hand_pub(TOPIC_RIGHT_HAND);
     right_hand_pub.InitChannel();
     LOG("右手灵巧手 DDS 按需发布就绪: " + std::string(TOPIC_RIGHT_HAND));
@@ -451,7 +585,12 @@ int main(int argc, char const* argv[]) {
               << "  按键控制:\n";
     for (int i = 0; i < SCENE_COUNT; ++i)
         std::cout << "    " << SCENES[i].key_name << " → "
-                  << SCENES[i].action_name << " (单次)\n";
+                  << SCENES[i].action_name
+                  << " / 右手: " << HandGestureName(SCENES[i].during_gesture)
+                  << "→" << HandGestureName(SCENES[i].end_gesture)
+                  << " / 左手: " << HandGestureName(SCENES[i].left_during_gesture)
+                  << "→" << HandGestureName(SCENES[i].left_end_gesture)
+                  << " (单次)\n";
     std::cout << "    ↓+A → 四场景循环 (间隔 " << LOOP_GAP_SEC << "s, 按一次开再按关)\n"
               << "    SELECT → 切换音色 (" << VOICE_NAMES[0] << " ↔ " << VOICE_NAMES[1] << ")\n"
               << "============================================================\n\n";
@@ -493,7 +632,7 @@ int main(int argc, char const* argv[]) {
 
             if (scene_id >= 0 && !g_busy.load() && !g_pcm_data[scene_id][g_voice_version.load()].empty()) {
                 g_busy.store(true);
-                PlayScene(scene_id, audio, arm, right_hand_pub, arm_ok);
+                PlayScene(scene_id, audio, arm, left_hand_pub, right_hand_pub, arm_ok);
                 g_busy.store(false);
                 std::this_thread::sleep_for(COOLDOWN_MS * 1ms);
             }
@@ -504,7 +643,7 @@ int main(int argc, char const* argv[]) {
             g_busy.store(true);
             for (int i = 0; i < SCENE_COUNT && g_loop_on.load() && g_running.load(); ++i) {
                 if (g_pcm_data[i][g_voice_version.load()].empty()) continue;
-                PlayScene(i, audio, arm, right_hand_pub, arm_ok);
+                PlayScene(i, audio, arm, left_hand_pub, right_hand_pub, arm_ok);
 
                 /* 间隔（期间检查停止按键） */
                 if (i < SCENE_COUNT - 1 && g_loop_on.load()) {
@@ -541,9 +680,10 @@ int main(int argc, char const* argv[]) {
     /* 退出 */
     LOG("安全退出中...");
     if (arm_ok) arm->ExecuteAction(ACT_RELEASE);
-    LOG("发布右手张开复位");
-    PublishRightHandPose(right_hand_pub, HAND_OPEN_POSE,
-                         std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
+    LOG("发布双手张开复位");
+    PublishHandGestures(left_hand_pub, right_hand_pub,
+                        HandGesture::Open, HandGesture::Open,
+                        std::chrono::milliseconds(RIGHT_HAND_PUBLISH_DURATION_MS));
     audio->LedControl(0, 0, 0);
     LOG("程序已退出");
     return 0;
