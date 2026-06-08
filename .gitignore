@@ -12,17 +12,18 @@ Linux常用命令_R1项目入门.md
 AGENTS.md
 # R1灵巧手项目讲解.md
 # 灵巧手 SDK header (不上传)
+灵巧手/灵巧手测试文件
 灵巧手/include/
 Git手册.md
 R1灵巧手项目讲解.md
 systemd使用指南.md
-R1本体\edge-tts音频生成技术文档.md
 问题排查.md
 NX-fixing-method.pdf
-灵巧手\灵巧手测试文件
+零件装配/test_r1_full_body_state_recorder.cpp
+零件装配/test_r1_right_arm_move_point.cpp
+零件装配/test_r1_arm_teach_points.cpp
+零件装配/test_r1_arm_state.cpp
 # 灵巧手实验文件（本地测试，不上传）
-# 灵巧手/
-
 # System files
 .DS_Store
 Thumbs.db
