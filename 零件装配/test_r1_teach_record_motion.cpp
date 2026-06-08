@@ -6,7 +6,8 @@
  *   It is inspired by the G1 teaching script, but it uses R1 low-level control:
  *   - subscribe rt/lowstate
  *   - publish rt/lowcmd
- *   - keep legs, waist, and head near the locked-standing reference pose
+ *   - keep legs and waist near the locked-standing reference pose
+ *   - leave the head uncontrolled by this program, so no fixed head point is required
  *   - make both arms low-stiffness and easy to guide by hand
  *   - record left-arm and right-arm trajectories in this version
  *
@@ -18,13 +19,16 @@
  *       -Wl,-rpath,./lib/aarch64:./thirdparty/lib/aarch64 \
  *       -o test_r1_teach_record_motion
  *
+ *   Note: hand DDS uses unitree_go MotorCmds_ which is part of unitree_sdk2.
+ *   The same -lunitree_sdk2 library already includes the Go2 MotorCmds types.
+ *
  * Run:
  *   ./test_r1_teach_record_motion eth10
  *
  * 学习目标：
  *   1. 理解“示教记录”：人手动带着机器人手臂做动作，程序把轨迹记下来。
  *   2. 理解“低刚度控制”：kp/kd 调小后，手臂更容易被人推动。
- *   3. 理解“身体保持 + 手臂示教”：腿、腰、头部保持锁定站立，左右臂低刚度跟随当前角度。
+ *   3. 理解“身体保持 + 手臂示教”：腿、腰保持锁定站立，头部不检查也不保持，左右臂低刚度跟随当前角度。
  *   4. 理解“轨迹文件”：JSON 里每一帧都是一个时间 t 和一组双臂角度 q。
  *
  * 你可以改：
@@ -71,6 +75,11 @@
 #include <thread>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <sys/select.h>
+#include <unistd.h>
+#endif
+
 // ===== 2. Unitree SDK2 头文件 =====
 // LowState_：读取 R1 全身电机状态。
 // LowCmd_：发送 R1 底层电机控制命令。
@@ -78,6 +87,7 @@
 // ChannelPublisher：发布 rt/lowcmd。
 #include "unitree/idl/hg/LowCmd_.hpp"
 #include "unitree/idl/hg/LowState_.hpp"
+#include "unitree/idl/go2/MotorCmds_.hpp"
 #include "unitree/robot/channel/channel_publisher.hpp"
 #include "unitree/robot/channel/channel_subscriber.hpp"
 
@@ -88,25 +98,31 @@ using LowState = unitree_hg::msg::dds_::LowState_;
 using FullPose = std::array<float, 26>;
 using ArmPose = std::array<float, 5>;
 using DualArmPose = std::array<float, 10>;
+using HandPose = std::array<float, 6>;
+using DualHandPose = std::array<float, 12>;
+using HandCmdsMsg = unitree_go::msg::dds_::MotorCmds_;
 
 // ===== 4. DDS 和运行参数 =====
 // 你可以改：kDefaultNetwork、kMotionName、记录时长、记录频率、示教 kp/kd。
 // 暂时不要改：kLowCmdTopic、kLowStateTopic、kControlPeriodUs。
 static constexpr const char* kLowCmdTopic = "rt/lowcmd";
 static constexpr const char* kLowStateTopic = "rt/lowstate";
+static constexpr const char* kRightHandTopic = "rt/brainco/right/cmd";
+static constexpr const char* kLeftHandTopic = "rt/brainco/left/cmd";
 static constexpr const char* kDefaultNetwork = "eth10";
 static constexpr const char* kMotionName = "r1_dual_arm_assembly_teach";
+static constexpr const char* kOutputFilename = "R1-hand.json";
 static constexpr int kControlPeriodUs = 2000;      // 500Hz 底层命令发布频率
-static constexpr double kRecordDurationSec = 12.0; // 默认记录 12 秒
+static constexpr double kRecordDurationSec = 60.0; // 默认记录 60 秒，避免示教中途太快退出低刚度
 static constexpr double kRecordRateHz = 30.0;      // 默认每秒记录 30 帧
-static constexpr float kTeachKp = 2.0f;            // 手臂低刚度，越小越软
-static constexpr float kTeachKd = 0.20f;           // 手臂阻尼，调小后更容易拖动；太小会显得松
-static constexpr float kStandKp = 60.0f;           // 腿、腰保持站立的刚度
-static constexpr float kStandKd = 3.0f;            // 腿、腰保持站立的阻尼
-static constexpr float kUpperHoldKp = 25.0f;       // 头部保持的刚度
-static constexpr float kUpperHoldKd = 1.5f;        // 头部保持的阻尼
+static constexpr float kTeachKp = 1.0f;            // 手臂低刚度，越小越软
+static constexpr float kTeachKd = 0.10f;           // 手臂阻尼，调小后更容易拖动；太小会显得松
+static constexpr float kStandKp = 90.0f;           // 腿、腰保持站立的刚度；站不稳时先加 Kp
+static constexpr float kStandKd = 5.0f;            // 腿、腰保持站立的阻尼；Kp 变大后适当加 Kd 防抖
 static constexpr float kMaxBodyStartErrorRad = 0.35f;
 static constexpr float kZero = 0.0f;
+static constexpr float kHandSpeed = 1.0f;        // 手部运动速度
+static constexpr int kHandPublishPeriodMs = 100;  // 手部发布间隔
 
 // ===== 5. 关节信息结构体 =====
 // idl_index：LowState/LowCmd 里的真实电机编号。
@@ -171,13 +187,43 @@ static const FullPose kLockedStandPose = {
 static const std::array<size_t, 5> kLeftArmPoseIndices{{14, 15, 16, 17, 18}};
 static const std::array<size_t, 5> kRightArmPoseIndices{{19, 20, 21, 22, 23}};
 
+// ===== 8b. 灵巧手常用手势预设 =====
+// 手指顺序: [拇指, 拇指副指, 食指, 中指, 无名指, 小指]
+// 范围: 0.0=张开, 1.0=全握
+// 你可以改：每个手势里的左右手 6 个 float 数值。
+static const HandPose kHandOpen       {{0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f}};
+static const HandPose kHandClose      {{1.00f, 1.00f, 1.00f, 1.00f, 1.00f, 1.00f}};
+static const HandPose kHandHalfFist   {{0.50f, 0.50f, 0.50f, 0.50f, 0.50f, 0.50f}};
+static const HandPose kLeftTaskGrip   {{0.00f, 0.00f, 0.20f, 0.20f, 0.20f, 0.20f}};
+static const HandPose kRightTaskGrip  {{0.60f, 0.60f, 0.70f, 0.70f, 0.70f, 0.70f}};
+static const HandPose kHandPinch      {{0.65f, 0.65f, 0.65f, 0.20f, 0.20f, 0.20f}};
+static const HandPose kHandVSign      {{1.00f, 1.00f, 0.00f, 0.00f, 1.00f, 1.00f}};
+
+struct NamedHandPose {
+    const char* key;
+    const char* name;
+    HandPose left_pose;
+    HandPose right_pose;
+};
+
+static const std::array<NamedHandPose, 6> kHandPresets{{
+    {"0", "open / 张开",                         kHandOpen,     kHandOpen},
+    {"1", "close / 全握",                        kHandClose,    kHandClose},
+    {"2", "half-fist / 半握拳",                  kHandHalfFist, kHandHalfFist},
+    {"3", "task-grip / 实测任务动作",            kLeftTaskGrip, kRightTaskGrip},
+    {"4", "pinch / 捏取",                        kHandPinch,    kHandPinch},
+    {"5", "v-sign / 剪刀手",                     kHandVSign,    kHandVSign},
+}};
+
 // ===== 9. 一帧记录数据 =====
 // t：从记录开始算起的时间，单位秒。
 // q：双臂 10 个关节角，单位 rad。
-// 顺序固定为：左臂 5 个 + 右臂 5 个。
+// h：双手 12 个手指位置，0.0=张开, 1.0=全握。
+// 顺序固定为：左臂 5 个 + 右臂 5 个, 左手 6 指 + 右手 6 指。
 struct RecordedFrame {
     double t = 0.0;
     DualArmPose q{};
+    DualHandPose h{};
 };
 
 // ===== 10. 跨线程共享状态 =====
@@ -190,6 +236,13 @@ static FullPose g_latest_full_pose{};
 static uint8_t g_mode_machine = 1;
 static uint64_t g_state_seq = 0;
 static bool g_state_valid = false;
+
+// ===== 10b. 灵巧手共享状态 =====
+// left_hand_pose / right_hand_pose：当前要发布给灵巧手的目标位置。
+// 主线程通过 '0'-'5' 按键修改，录制时逐帧记录到 JSON。
+static std::mutex g_hand_mutex;
+static HandPose g_left_hand_pose = kHandOpen;
+static HandPose g_right_hand_pose = kHandOpen;
 
 // ===== 11. Ctrl+C 信号处理 =====
 // 只做最小工作：关掉运行开关和控制开关。
@@ -230,6 +283,174 @@ static uint32_t Crc32Core(uint32_t* ptr, uint32_t len) {
 // 控制代码用 rad，打印给人看时用 deg 更直观。
 static float RadToDeg(float rad) {
     return rad * 180.0f / 3.14159265358979323846f;
+}
+
+static bool IsHeadJoint(const JointInfo& joint) {
+    return std::strcmp(joint.group_name, "头部") == 0;
+}
+
+// ===== 13b. 灵巧手辅助函数 =====
+static void SetHandPose(HandCmdsMsg& msg, const HandPose& pose) {
+    msg.cmds().resize(6);
+    for (size_t i = 0; i < pose.size(); ++i) {
+        msg.cmds()[i].q() = pose[i];
+        msg.cmds()[i].dq() = kHandSpeed;
+    }
+}
+
+static void SetCurrentHandPoses(const HandPose& left, const HandPose& right) {
+    std::lock_guard<std::mutex> lock(g_hand_mutex);
+    g_left_hand_pose = left;
+    g_right_hand_pose = right;
+}
+
+static void GetCurrentHandPoses(HandPose& left, HandPose& right) {
+    std::lock_guard<std::mutex> lock(g_hand_mutex);
+    left = g_left_hand_pose;
+    right = g_right_hand_pose;
+}
+
+static DualHandPose GetCurrentDualHandPose() {
+    std::lock_guard<std::mutex> lock(g_hand_mutex);
+    DualHandPose dual{};
+    for (size_t i = 0; i < 6; ++i) {
+        dual.at(i) = g_left_hand_pose.at(i);
+        dual.at(i + 6) = g_right_hand_pose.at(i);
+    }
+    return dual;
+}
+
+// 灵巧手发布线程：以 100ms 间隔持续向左右手发送当前目标位置
+static void HandWriterLoop(
+    unitree::robot::ChannelPublisher<HandCmdsMsg>* left_pub,
+    unitree::robot::ChannelPublisher<HandCmdsMsg>* right_pub) {
+    while (g_running.load()) {
+        HandPose left_pose{}, right_pose{};
+        GetCurrentHandPoses(left_pose, right_pose);
+
+        HandCmdsMsg left_msg, right_msg;
+        SetHandPose(left_msg, left_pose);
+        SetHandPose(right_msg, right_pose);
+
+        left_pub->Write(left_msg);
+        right_pub->Write(right_msg);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(kHandPublishPeriodMs));
+    }
+}
+
+static void PrintDualHandPose(const DualHandPose& dual, const char* title) {
+    std::cout << "\n" << title << "\n";
+    std::cout << "左手: [";
+    for (size_t i = 0; i < 6; ++i) {
+        std::cout << std::fixed << std::setprecision(2) << dual.at(i);
+        if (i < 5) std::cout << ", ";
+    }
+    std::cout << "]\n右手: [";
+    for (size_t i = 6; i < 12; ++i) {
+        std::cout << std::fixed << std::setprecision(2) << dual.at(i);
+        if (i < 11) std::cout << ", ";
+    }
+    std::cout << "]\n" << std::defaultfloat;
+}
+
+// ===== 13c. 解析并应用灵巧手手势输入 =====
+// 支持：
+// - 0-5：双手一起变成某个手势；其中 3 会使用左右手各自的实测任务动作。
+// - l0-l5：只改左手；其中 l3 是左手实测任务动作。
+// - r0-r5：只改右手；其中 r3 是右手实测任务动作。
+// 你应该学会：把重复逻辑封装成函数，主菜单和录制过程就不会各写一份。
+static bool ApplyHandCommand(const std::string& input, bool verbose) {
+    if (input.empty()) return false;
+
+    if ((input.at(0) == 'l' || input.at(0) == 'L') && input.size() >= 2) {
+        const char digit = input.at(1);
+        for (const auto& hp : kHandPresets) {
+            if (digit == hp.key[0]) {
+                HandPose left, right;
+                GetCurrentHandPoses(left, right);
+                SetCurrentHandPoses(hp.left_pose, right);
+                if (verbose) {
+                    std::cout << "左手已设置为: " << hp.name << "（右手不变）\n";
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if ((input.at(0) == 'r' || input.at(0) == 'R') && input.size() >= 2) {
+        const char digit = input.at(1);
+        for (const auto& hp : kHandPresets) {
+            if (digit == hp.key[0]) {
+                HandPose left, right;
+                GetCurrentHandPoses(left, right);
+                SetCurrentHandPoses(left, hp.right_pose);
+                if (verbose) {
+                    std::cout << "右手已设置为: " << hp.name << "（左手不变）\n";
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    for (const auto& hp : kHandPresets) {
+        if (input == hp.key || input.at(0) == hp.key[0]) {
+            SetCurrentHandPoses(hp.left_pose, hp.right_pose);
+            if (verbose) {
+                std::cout << "双手已设置为: " << hp.name << "\n";
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// ===== 13d. 录制期间非阻塞读取键盘输入 =====
+// 正常 getline 会卡住程序，不适合录制中使用。
+// 这里在 Linux/R1 上用 select() 检查键盘有没有输入：没有输入就立刻返回，不影响录制。
+// 你可以改：不用改。录制时输入 0-5、l0-l5、r0-r5 后回车即可改变并记录手势。
+static bool TryReadLineNonBlocking(std::string& line) {
+#if defined(_WIN32)
+    (void)line;
+    return false;
+#else
+    static std::string buffer;
+    fd_set read_set;
+    FD_ZERO(&read_set);
+    FD_SET(STDIN_FILENO, &read_set);
+
+    timeval timeout{};
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+
+    const int ready = select(STDIN_FILENO + 1, &read_set, nullptr, nullptr, &timeout);
+    if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &read_set)) {
+        return false;
+    }
+
+    char ch = '\0';
+    while (read(STDIN_FILENO, &ch, 1) == 1) {
+        if (ch == '\n' || ch == '\r') {
+            line = buffer;
+            buffer.clear();
+            return true;
+        }
+        buffer.push_back(ch);
+
+        FD_ZERO(&read_set);
+        FD_SET(STDIN_FILENO, &read_set);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 0;
+        if (select(STDIN_FILENO + 1, &read_set, nullptr, nullptr, &timeout) <= 0) {
+            break;
+        }
+    }
+
+    return false;
+#endif
 }
 
 // ===== 14. LowState 回调函数 =====
@@ -307,9 +528,12 @@ static std::string MakeTimestamp() {
 }
 
 // ===== 19. 生成默认输出文件名 =====
-// 你可以改文件名前缀，但建议保留时间戳。
+// 你可以改：kOutputFilename。
+// 说明：
+// - 现在固定输出 R1-hand.json，方便后续回放程序直接读取固定文件。
+// - 每次录制会覆盖上一次 R1-hand.json；如果你想保留历史文件，需要手动改名备份。
 static std::string DefaultOutputPath() {
-    return "r1_dual_arm_teach_" + MakeTimestamp() + ".json";
+    return kOutputFilename;
 }
 
 // ===== 20. JSON 字符串转义 =====
@@ -328,6 +552,39 @@ static std::string JsonEscape(const std::string& text) {
         }
     }
     return out.str();
+}
+
+// ===== 20b. JSON 数组写入工具 =====
+// 你应该学会：轨迹文件最怕“顺序不清楚”。这里统一输出数组，后续回放代码按同一顺序读取。
+template <typename ArrayLike>
+static void WriteNumberArray(std::ostream& out, const ArrayLike& values) {
+    out << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << values.at(i);
+    }
+    out << "]";
+}
+
+static void WriteArmJointIdArray(std::ostream& out) {
+    out << "[";
+    for (size_t i = 0; i < kLeftArmPoseIndices.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << kR1Joints.at(kLeftArmPoseIndices.at(i)).idl_index;
+    }
+    for (size_t i = 0; i < kRightArmPoseIndices.size(); ++i) {
+        out << ", " << kR1Joints.at(kRightArmPoseIndices.at(i)).idl_index;
+    }
+    out << "]";
+}
+
+static void WriteStringList(std::ostream& out, const std::vector<std::string>& values) {
+    out << "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) out << ", ";
+        out << "\"" << JsonEscape(values.at(i)) << "\"";
+    }
+    out << "]";
 }
 
 // ===== 21. 打印单条手臂角度 =====
@@ -389,8 +646,9 @@ static void PrintRecordedDualArmPose(const DualArmPose& pose, const std::string&
 
 // ===== 24. 检查当前身体姿态是否接近锁定站立基准 =====
 // 安全意义：
-// - 如果机器人腿、腰、头不是锁定站立，直接命令它去 kLockedStandPose 可能产生明显动作。
+// - 如果机器人腿、腰不是锁定站立，直接命令它去 kLockedStandPose 可能产生明显动作。
 // - 左右臂都允许后续自由示教，所以安全检查不再用手臂位置拦截开始。
+// - 头部不参与检查，也不由本程序保持点位。
 static bool CheckBodyCloseToLockedStand(const FullPose& current) {
     float max_error = 0.0f;
     const JointInfo* max_joint = nullptr;
@@ -398,6 +656,7 @@ static bool CheckBodyCloseToLockedStand(const FullPose& current) {
     for (size_t i = 0; i < kR1Joints.size(); ++i) {
         const JointInfo& joint = kR1Joints.at(i);
         if (joint.is_teach_arm) continue;
+        if (IsHeadJoint(joint)) continue;
 
         const float error = std::fabs(current.at(i) - kLockedStandPose.at(i));
         if (error > max_error) {
@@ -417,7 +676,7 @@ static bool CheckBodyCloseToLockedStand(const FullPose& current) {
                   << ", error=" << max_error
                   << " rad (" << RadToDeg(max_error) << " deg)\n";
     }
-    std::cout << "请先确认机器人处于调试模式的锁定站立姿态，再重新输入 r。\n";
+    std::cout << "请先确认机器人腿和腰处于调试模式的锁定站立姿态，再重新输入 r。\n";
     return false;
 }
 
@@ -435,7 +694,7 @@ static void DisableAllMotors(LowCmd& cmd) {
 }
 
 // ===== 26. 根据身体部位选择保持参数 =====
-// 腿、腰需要更强保持；头部只做温和保持；左右臂都低刚度。
+// 腿、腰需要更强保持；左右臂都低刚度；头部不由本程序控制。
 static void SelectHoldGains(const JointInfo& joint, float& kp, float& kd) {
     if (joint.is_teach_arm) {
         kp = kTeachKp;
@@ -446,18 +705,23 @@ static void SelectHoldGains(const JointInfo& joint, float& kp, float& kd) {
         kp = kStandKp;
         kd = kStandKd;
     } else {
-        kp = kUpperHoldKp;
-        kd = kUpperHoldKd;
+        kp = kZero;
+        kd = kZero;
     }
 }
 
 // ===== 27. 填充全身命令 =====
 // 核心逻辑：
-// - 腿、腰、头部：命令到 kLockedStandPose。
+// - 腿、腰：命令到 kLockedStandPose。
+// - 头部：跳过，不发布保持命令。
 // - 左右臂：命令到当前实际角度，且 kp/kd 很低，方便人手动带动。
 static void FillFullBodyTeachCommand(LowCmd& cmd, const FullPose& latest_pose) {
     for (size_t i = 0; i < kR1Joints.size(); ++i) {
         const JointInfo& joint = kR1Joints.at(i);
+        if (IsHeadJoint(joint)) {
+            continue;
+        }
+
         const int id = joint.idl_index;
         float kp = 0.0f;
         float kd = 0.0f;
@@ -553,39 +817,65 @@ static bool WriteMotionJson(const std::string& output_path,
 
     out << std::fixed << std::setprecision(6);
     out << "{\n";
-    out << "  \"format\": \"r1_dual_arm_motion_v1\",\n";
+    out << "  \"format\": \"r1_dual_arm_hand_motion_v1\",\n";
+    out << "  \"schema_version\": 1,\n";
     out << "  \"name\": \"" << JsonEscape(kMotionName) << "\",\n";
     out << "  \"created_at\": \"" << MakeTimestamp() << "\",\n";
     out << "  \"recording_mode\": \"compliant_teach_lowcmd\",\n";
-    out << "  \"units\": \"radians\",\n";
+    out << "  \"units\": \"radians_for_arm__normalized_0to1_for_hand\",\n";
+    out << "  \"replay_note\": \"frames[].q is dual-arm command trajectory; frames[].h is dual-hand command trajectory\",\n";
     out << "  \"duration\": " << duration_sec << ",\n";
     out << "  \"sample_rate_hz\": " << kRecordRateHz << ",\n";
     out << "  \"teach_kp\": " << kTeachKp << ",\n";
     out << "  \"teach_kd\": " << kTeachKd << ",\n";
+    out << "  \"lowcmd_topic\": \"" << kLowCmdTopic << "\",\n";
+    out << "  \"lowstate_topic\": \"" << kLowStateTopic << "\",\n";
+    out << "  \"left_hand_cmd_topic\": \"" << kLeftHandTopic << "\",\n";
+    out << "  \"right_hand_cmd_topic\": \"" << kRightHandTopic << "\",\n";
     out << "  \"locked_stand_pose_order\": \"kR1Joints\",\n";
-    out << "  \"joint_count\": 10,\n";
-    out << "  \"joint_order\": \"left_arm_then_right_arm\",\n";
-    out << "  \"joint_names\": [";
-    for (size_t i = 0; i < kLeftArmPoseIndices.size(); ++i) {
-        const JointInfo& joint = kR1Joints.at(kLeftArmPoseIndices.at(i));
-        out << "\"" << joint.english_name << "\"";
-        out << ", ";
-    }
-    for (size_t i = 0; i < kRightArmPoseIndices.size(); ++i) {
-        const JointInfo& joint = kR1Joints.at(kRightArmPoseIndices.at(i));
-        out << "\"" << joint.english_name << "\"";
-        if (i + 1 < kRightArmPoseIndices.size()) out << ", ";
-    }
-    out << "],\n";
+    out << "  \"locked_stand_pose\": ";
+    WriteNumberArray(out, kLockedStandPose);
+    out << ",\n";
+    out << "  \"arm_joint_count\": 10,\n";
+    out << "  \"hand_finger_count\": 12,\n";
+    out << "  \"arm_order\": \"left_arm_5_then_right_arm_5\",\n";
+    out << "  \"hand_order\": \"left_hand_6_then_right_hand_6\",\n";
+    out << "  \"finger_order\": \"[thumb,thumb_aux,index,middle,ring,pinky]\",\n";
+    out << "  \"arm_joint_idl_indices\": ";
+    WriteArmJointIdArray(out);
+    out << ",\n";
+    out << "  \"joint_names\": ";
+    WriteStringList(out, {
+        "L_SHOULDER_PITCH", "L_SHOULDER_ROLL", "L_SHOULDER_YAW", "L_ELBOW", "L_WRIST_ROLL",
+        "R_SHOULDER_PITCH", "R_SHOULDER_ROLL", "R_SHOULDER_YAW", "R_ELBOW", "R_WRIST_ROLL"
+    });
+    out << ",\n";
+    out << "  \"joint_names_cn\": ";
+    WriteStringList(out, {
+        "左肩前后", "左肩左右", "左肩旋转", "左肘", "左腕旋转",
+        "右肩前后", "右肩左右", "右肩旋转", "右肘", "右腕旋转"
+    });
+    out << ",\n";
+    out << "  \"hand_finger_names\": ";
+    WriteStringList(out, {
+        "L_THUMB", "L_THUMB_AUX", "L_INDEX", "L_MIDDLE", "L_RING", "L_PINKY",
+        "R_THUMB", "R_THUMB_AUX", "R_INDEX", "R_MIDDLE", "R_RING", "R_PINKY"
+    });
+    out << ",\n";
+    out << "  \"hand_finger_names_cn\": ";
+    WriteStringList(out, {
+        "左拇指", "左拇指副指", "左食指", "左中指", "左无名指", "左小指",
+        "右拇指", "右拇指副指", "右食指", "右中指", "右无名指", "右小指"
+    });
+    out << ",\n";
     out << "  \"frames\": [\n";
     for (size_t frame_i = 0; frame_i < frames.size(); ++frame_i) {
         const RecordedFrame& frame = frames.at(frame_i);
-        out << "    {\"t\": " << frame.t << ", \"q\": [";
-        for (size_t q_i = 0; q_i < frame.q.size(); ++q_i) {
-            out << frame.q.at(q_i);
-            if (q_i + 1 < frame.q.size()) out << ", ";
-        }
-        out << "]}";
+        out << "    {\"t\": " << frame.t << ", \"q\": ";
+        WriteNumberArray(out, frame.q);
+        out << ", \"h\": ";
+        WriteNumberArray(out, frame.h);
+        out << "}";
         if (frame_i + 1 < frames.size()) out << ",";
         out << "\n";
     }
@@ -615,9 +905,15 @@ static void RecordMotion(unitree::robot::ChannelPublisher<LowCmd>& publisher) {
     }
 
     PrintDualArmPose(start_pose, "记录开始前双臂角度", seq);
+    PrintDualHandPose(GetCurrentDualHandPose(), "当前灵巧手姿态");
     std::cout << "Record duration: " << kRecordDurationSec << " sec\n";
     std::cout << "Record rate: " << kRecordRateHz << " Hz\n";
     std::cout << "Teach gains: kp=" << kTeachKp << ", kd=" << kTeachKd << "\n";
+    std::cout << "During recording, you can type hand commands then press Enter:\n";
+    std::cout << "  0-5 = both hands, l0-l5 = left hand, r0-r5 = right hand\n";
+    std::cout << "  3/l3/r3 = 实测任务动作：左手[0,0,0.2,0.2,0.2,0.2]，右手[0.6,0.6,0.7,0.7,0.7,0.7]\n";
+    std::cout << "  s = stop and save / 提前结束并保存\n";
+    std::cout << "Output JSON will overwrite: " << kOutputFilename << "\n";
     Countdown();
     if (!g_running.load()) {
         std::cout << "Recording canceled before control started.\n";
@@ -634,8 +930,11 @@ static void RecordMotion(unitree::robot::ChannelPublisher<LowCmd>& publisher) {
     auto next_tick = start_time;
     const auto record_period = std::chrono::microseconds(
         static_cast<int>(1000000.0 / kRecordRateHz));
+    bool stop_and_save_requested = false;
 
-    while (g_running.load() && std::chrono::steady_clock::now() < end_time) {
+    while (g_running.load() &&
+           !stop_and_save_requested &&
+           std::chrono::steady_clock::now() < end_time) {
         const auto now = std::chrono::steady_clock::now();
         if (now < next_tick) {
             auto sleep_duration = next_tick - now;
@@ -646,11 +945,28 @@ static void RecordMotion(unitree::robot::ChannelPublisher<LowCmd>& publisher) {
             continue;
         }
 
+        std::string hand_input;
+        if (TryReadLineNonBlocking(hand_input)) {
+            if (hand_input == "s" || hand_input == "S") {
+                std::cout << "收到 s：提前结束录制并保存。\n";
+                stop_and_save_requested = true;
+            } else if (ApplyHandCommand(hand_input, true)) {
+                PrintDualHandPose(GetCurrentDualHandPose(), "录制中灵巧手姿态已更新");
+            } else if (!hand_input.empty()) {
+                std::cout << "[WARN] 录制中忽略无效手势输入: " << hand_input << "\n";
+            }
+        }
+
+        if (stop_and_save_requested) {
+            break;
+        }
+
         FullPose latest_pose{};
         if (GetLatestFullPose(latest_pose, mode_machine, seq)) {
             RecordedFrame frame;
             frame.t = std::chrono::duration<double>(now - start_time).count();
             frame.q = ExtractDualArm(latest_pose);
+            frame.h = GetCurrentDualHandPose();
             frames.push_back(frame);
         }
         next_tick += record_period;
@@ -666,19 +982,29 @@ static void RecordMotion(unitree::robot::ChannelPublisher<LowCmd>& publisher) {
         std::cout << "Saved " << frames.size() << " frames to " << output_path << "\n";
         PrintRecordedDualArmPose(frames.front().q, "first_frame");
         PrintRecordedDualArmPose(frames.back().q, "last_frame");
+        PrintDualHandPose(frames.front().h, "first_hand_pose");
+        PrintDualHandPose(frames.back().h, "last_hand_pose");
     }
 }
 
 // ===== 33. 打印操作菜单 =====
 // 你应该学会：危险测试程序要用清晰菜单减少误操作。
 static void PrintMenu() {
-    std::cout << "\n================ R1 双臂低刚度示教记录 ================\n";
+    std::cout << "\n================ R1 双臂+灵巧手低刚度示教记录 ================\n";
     std::cout << "  v = 查看当前双臂角度\n";
+    std::cout << "  hh = 查看当前灵巧手姿态\n";
     std::cout << "  r = 倒计时后开始记录双臂示教轨迹\n";
     std::cout << "  h = 显示菜单\n";
     std::cout << "  q = 退出\n";
     std::cout << "  Ctrl+C = 停止控制并退出\n";
-    std::cout << "说明：本程序会发布 rt/lowcmd，只能在调试模式下使用。\n";
+    std::cout << "  录制中输入 s 回车 = 提前结束并保存 JSON\n";
+    std::cout << "\n灵巧手控制：\n";
+    std::cout << "  双手: 0-5  左手: l0-l5  右手: r0-r5\n";
+    std::cout << "  3 = 双手应用左右各自实测任务动作；l3/r3 = 单独设置左/右手实测任务动作\n";
+    for (const auto& hp : kHandPresets) {
+        std::cout << "  " << hp.key << " = " << hp.name << "\n";
+    }
+    std::cout << "说明：本程序会发布 rt/lowcmd + 灵巧手 DDS，只能在调试模式下使用。\n";
 }
 
 // ===== 34. 主函数 =====
@@ -692,12 +1018,13 @@ int main(int argc, char** argv) {
 
     const std::string network = (argc >= 2) ? argv[1] : kDefaultNetwork;
 
-    std::cout << "R1 dual-arm compliant teaching recorder\n";
+    std::cout << "R1 dual-arm + dexterous hand compliant teaching recorder\n";
     std::cout << "Network interface: " << network << "\n";
     std::cout << "Subscribe topic: " << kLowStateTopic << "\n";
     std::cout << "Publish topic: " << kLowCmdTopic << "\n";
-    std::cout << "Safety: publishes rt/lowcmd only after you type r.\n";
-    std::cout << "Mode: legs/waist/head locked stand + low-stiffness arms.\n";
+    std::cout << "Hand topics: " << kLeftHandTopic << ", " << kRightHandTopic << "\n";
+    std::cout << "Safety: publishes rt/lowcmd only after you type r; hand DDS publishes current gesture.\n";
+    std::cout << "Mode: legs/waist locked stand + head disabled + low-stiffness arms + hand DDS.\n";
 
     try {
         unitree::robot::ChannelFactory::Instance()->Init(0, network);
@@ -709,6 +1036,11 @@ int main(int argc, char** argv) {
 
         unitree::robot::ChannelPublisher<LowCmd> lowcmd_publisher(kLowCmdTopic);
         lowcmd_publisher.InitChannel();
+
+        unitree::robot::ChannelPublisher<HandCmdsMsg> left_hand_pub(kLeftHandTopic);
+        left_hand_pub.InitChannel();
+        unitree::robot::ChannelPublisher<HandCmdsMsg> right_hand_pub(kRightHandTopic);
+        right_hand_pub.InitChannel();
 
         std::cout << "Waiting for first lowstate frame...\n";
         while (g_running.load()) {
@@ -725,42 +1057,61 @@ int main(int argc, char** argv) {
         }
 
         std::thread writer_thread(CommandWriterLoop, &lowcmd_publisher);
+        std::thread hand_writer_thread(HandWriterLoop, &left_hand_pub, &right_hand_pub);
 
         PrintMenu();
         std::cout << "> " << std::flush;
         std::string input;
         while (g_running.load() && std::getline(std::cin, input)) {
-            if (input.empty()) {
-                PrintMenu();
-                continue;
+            if (input.empty()) { PrintMenu(); goto prompt; }
+
+            // ---- 多字符命令优先判断（必须在单字符之前）----
+
+            // hh: 查看灵巧手姿态
+            if (input == "hh" || input == "HH") {
+                PrintDualHandPose(GetCurrentDualHandPose(), "当前灵巧手姿态");
+                goto prompt;
             }
 
-            const char key = input.at(0);
-            if (key == 'v' || key == 'V') {
-                FullPose pose{};
-                uint8_t mode_machine = 1;
-                uint64_t seq = 0;
-                if (GetLatestFullPose(pose, mode_machine, seq)) {
-                    PrintDualArmPose(pose, "当前双臂角度", seq);
-                } else {
-                    std::cout << "[WARN] 还没有收到 rt/lowstate。\n";
-                }
-            } else if (key == 'r' || key == 'R') {
-                RecordMotion(lowcmd_publisher);
-            } else if (key == 'h' || key == 'H') {
-                PrintMenu();
-            } else if (key == 'q' || key == 'Q') {
-                break;
-            } else {
-                std::cout << "无效输入。请输入 v/r/h/q。\n";
+            // 0-5 / l0-l5 / r0-r5：设置灵巧手手势。
+            // 这套解析函数也被录制过程复用，保证菜单操作和 JSON 记录规则一致。
+            if (ApplyHandCommand(input, true)) {
+                goto prompt;
             }
-            std::cout << "> " << std::flush;
+
+            // ---- 单字符命令（放在独立作用域内，避免 goto 跨越初始化）----
+            {
+                const char key = input.at(0);
+
+                if (key == 'v' || key == 'V') {
+                    FullPose pose{};
+                    uint8_t mode_machine = 1;
+                    uint64_t seq = 0;
+                    if (GetLatestFullPose(pose, mode_machine, seq)) {
+                        PrintDualArmPose(pose, "当前双臂角度", seq);
+                    } else {
+                        std::cout << "[WARN] 还没有收到 rt/lowstate。\n";
+                    }
+                } else if (key == 'r' || key == 'R') {
+                    RecordMotion(lowcmd_publisher);
+                } else if (key == 'h' || key == 'H') {
+                    PrintMenu();
+                } else if (key == 'q' || key == 'Q') {
+                    break;
+                } else {
+                    std::cout << "无效输入。v/h/hh/q | 0-5(双手) | l0-l5(左手) | r0-r5(右手)。\n";
+                }
+            }
+
+        prompt:
+            if (g_running.load()) std::cout << "> " << std::flush;
         }
 
         g_control_enabled.store(false);
         PublishDisableFrames(lowcmd_publisher, 20);
         g_running.store(false);
         if (writer_thread.joinable()) writer_thread.join();
+        if (hand_writer_thread.joinable()) hand_writer_thread.join();
     } catch (const std::exception& e) {
         std::cerr << "Program error: " << e.what() << "\n";
         return 1;
