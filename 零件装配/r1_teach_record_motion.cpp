@@ -1,5 +1,6 @@
 /*
  * R1 dual-arm compliant teaching recorder.
+ * GitHub display label: R1 teaching recorder program.
  *
  * Purpose:
  *   This program records a manually taught dual-arm motion on Unitree R1.
