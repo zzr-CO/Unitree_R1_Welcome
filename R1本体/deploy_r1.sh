@@ -2,13 +2,13 @@
 # GitHub display label: 一键部署
 
 # =============================================================
-# R1 展厅接待程序 - 一键部署/更新脚本
+# R1 早安问好手动补充程序 - 一键部署/更新脚本
 # 功能：
 #   1. 首次运行：自动创建systemd服务 + 启用自启动
 #   2. 以后运行：编译 + 部署 + 重启服务
 #   3. 配置日志文件输出和logrotate自动轮转
 # 使用方法：
-#   1. 把本脚本和 r1_show_control.cpp 放在同一目录
+#   1. 把本脚本和 r1_morning.cpp 放在同一目录
 #   2. 赋予执行权限：chmod +x deploy_r1.sh
 #   3. 修改下面的配置区（第23-49行）
 #   4. 运行：./deploy_r1.sh
@@ -23,7 +23,7 @@ echo "[INFO] 脚本所在目录: ${SCRIPT_DIR}"
 
 # ==================== 配置区 ====================
 # 只需要修改下面这一行：源文件名（相对于脚本所在目录）
-SOURCE_FILE="r1_show_control.cpp"
+SOURCE_FILE="r1_morning.cpp"
 
 # 自动推导其他路径（通常无需修改）
 # 编译输出文件名 = 源文件名去掉 .cpp 后缀
@@ -51,7 +51,7 @@ NETWORK_IF="eth10"
 
 
 echo "============================================================"
-echo "  R1 展厅接待程序 - 部署/更新脚本"
+echo "  R1 早安问好手动补充程序 - 部署/更新脚本"
 echo "  日志文件: ${LOG_FILE}"
 echo "============================================================"
 echo ""
@@ -111,7 +111,7 @@ if [ ! -f "${SERVICE_FILE}" ]; then
     echo "  [INFO] 首次部署，创建 systemd 服务..."
     sudo tee "${SERVICE_FILE}" > /dev/null <<EOF
 [Unit]
-Description=Unitree R1 Showroom Control
+Description=Unitree R1 Morning Manual Greeting
 After=network-online.target
 Wants=network-online.target
 
