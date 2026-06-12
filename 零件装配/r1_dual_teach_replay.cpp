@@ -1,5 +1,6 @@
 /*
  * R1 dual-arm + dexterous-hand trajectory replayer.
+ * GitHub display label: R1 teaching replay program.
  *
  * Purpose:
  *   Play back a dual-arm trajectory JSON file recorded by
