@@ -1,4 +1,5 @@
 #!/bin/bash
+# GitHub display label: 一键删除
 # 完整清理 r1_show_control 程序的所有痕迹（不含音频文件）
 # 使用方法：
 #   1. 上传此脚本到机器人：/home/unitree/
