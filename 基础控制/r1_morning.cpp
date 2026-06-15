@@ -1,15 +1,14 @@
 /**
  * 1.0版本 动作添加奥特曼激光
 =============================================================
- * Unitree R1 — 展厅接待程序（双音色版本）
- * Showroom Reception (PCM audio + DDS-based)
+ * Unitree R1 — 早安问好手动补充程序（双音色版本）
+ * Morning Manual Greeting (PCM audio + DDS-based)
  * 
  * 按键操作（已按你的需求修改）：
  *   ← + A   → 话术1 + 奥特曼光线(24)（单次）
  *   ← + B   → 话术2 + 脸部挥手(25) + 右手比耶（单次）
  *   ← + X   → 话术3 + 手放胸口鞠躬(33)（单次）
  *   ← + Y   → 话术4 + 点赞/肯定(19) + 双手点赞（单次）
- *   ↓ + A   → 四场景循环模式 开始/停止（间隔%ds）
  *   SELECT  → 切换音色版本（原始版 ↔ 东北话版）
  *
  * PCM音频文件位于：/home/unitree/voice_pack/audio_show/
@@ -17,18 +16,18 @@
  *   - 东北话版: morning_01_xiaobei.pcm ~ morning_04_xiaobei.pcm
  *
  * 日志位置：
- *   实时查看: sudo journalctl -u r1-show.service -f
+ *   实时查看: sudo journalctl -u r1-morning.service -f
  *
- * 编译（在 unitree_sdk2-1.0 根目录）：
- *   g++ -std=c++17 r1_show_control.cpp \
+ * 编译（在 unitree_sdk2-2.0 根目录）：
+ *   g++ -std=c++17 r1_morning.cpp \
  *       -I./include -I./thirdparty/include/ddscxx \
  *       -L./lib/aarch64 -L./thirdparty/lib/aarch64 \
  *       -lunitree_sdk2 -lddscxx -lddsc -lpthread \
  *       -Wl,-rpath,./lib/aarch64:./thirdparty/lib/aarch64 \
- *       -o r1_show_control
+ *       -o r1_morning
  *
  * 运行：
- *   ./r1_show_control eth10
+ *   ./r1_morning eth10
  *
  * 右手灵巧手说明：
  *   - 程序只在需要手势或复位时，向 rt/brainco/right/cmd 短时间发布右手指令
@@ -75,7 +74,7 @@
 using namespace std::chrono_literals;
 
 /* ============ 时间戳日志（同时输出到 stdout 和本地文件）============ */
-static constexpr const char* LOG_FILE = "/var/log/r1_show_control.log";
+static constexpr const char* LOG_FILE = "/var/log/r1_morning.log";
 static std::mutex g_log_mutex;
 
 static std::string NowStr() {
@@ -117,7 +116,6 @@ static constexpr uint8_t VOLUME       = 100;
 static constexpr int     ACT_RELEASE  = 99;
 static constexpr int     COOLDOWN_MS  = 400;
 static constexpr int     CHUNK_SIZE   = 32000;   // 成功案例的chunk size
-static constexpr int     LOOP_GAP_SEC = 2;       // 循环模式间隔（秒）
 static constexpr double  WAIT_BUFFER  = 1.0;     // 音频结束后等待1秒再接受新指令
 
 static constexpr int PCM_RATE      = 16000;
@@ -312,7 +310,6 @@ static double GetActionDuration(int32_t action_id) {
 
 static std::atomic<bool> g_running{true};
 static std::atomic<bool> g_busy{false};
-static std::atomic<bool> g_loop_on{false};  // ↓+A 循环模式
 
 /* 音色版本控制 */
 static std::atomic<VoiceVersion> g_voice_version{VOICE_DEFAULT};
@@ -324,7 +321,6 @@ static double               g_pcm_duration[SCENE_COUNT][2] = {{0}};
 void SignalHandler(int) {
     LOG("收到退出信号");
     g_running.store(false);
-    g_loop_on.store(false);
 }
 
 bool LoadPcm(const std::string& path, std::vector<uint8_t>& out, double& dur) {
@@ -394,7 +390,7 @@ void PlayScene(int id,
     while (offset < total) {
         size_t n = std::min(static_cast<size_t>(CHUNK_SIZE), total - offset);
         std::vector<uint8_t> chunk(pcm.begin() + offset, pcm.begin() + offset + n);
-        audio->PlayStream("r1_show", stream_id, chunk);
+        audio->PlayStream("r1_morning", stream_id, chunk);
         offset += n;
         std::this_thread::sleep_for(100ms);
     }
@@ -440,7 +436,7 @@ void PlayScene(int id,
 
     /* 结束（先灭灯，再收尾，避免灯还亮着但什么都做不了的错觉） */
     audio->LedControl(0, 0, 0);
-    audio->PlayStop("r1_show");
+    audio->PlayStop("r1_morning");
     if (arm_ok) arm->ExecuteAction(ACT_RELEASE);
     if (used_right_hand || used_left_hand) {
         PublishHandGestures(
@@ -471,7 +467,6 @@ public:
         x.Update(key.bits.X); y.Update(key.bits.Y);
         select_btn.Update(key.bits.select);
     }
-    bool DownA()  const { return down.on_press && a.pressed; }  // ↓+A 循环开关
     bool LeftA()  const { return left.on_press && a.pressed; }  // ←+A
     bool LeftB()  const { return left.on_press && b.pressed; }  // ←+B
     bool LeftX()  const { return left.on_press && x.pressed; }  // ←+X
@@ -499,7 +494,7 @@ int main(int argc, char const* argv[]) {
 
     /* 清空旧日志，开始新会话 */
     { std::ofstream f(LOG_FILE, std::ios::trunc); }
-    LOG("══════ R1 展厅接待程序启动（双音色版本）══════");
+    LOG("══════ R1 早安问好手动补充程序启动（双音色版本）══════");
     LOG("网络接口: " + network);
 
     /* DDS */
@@ -580,7 +575,7 @@ int main(int argc, char const* argv[]) {
 
     /* 欢迎信息 */
     std::cout << "\n============================================================\n"
-              << "  Unitree R1 — 展厅接待控制（双音色版本）\n"
+              << "  Unitree R1 — 早安问好手动补充控制（双音色版本）\n"
               << "  当前音色: " << VOICE_NAMES[g_voice_version.load()] << "\n"
               << "  按键控制:\n";
     for (int i = 0; i < SCENE_COUNT; ++i)
@@ -591,8 +586,7 @@ int main(int argc, char const* argv[]) {
                   << " / 左手: " << HandGestureName(SCENES[i].left_during_gesture)
                   << "→" << HandGestureName(SCENES[i].left_end_gesture)
                   << " (单次)\n";
-    std::cout << "    ↓+A → 四场景循环 (间隔 " << LOOP_GAP_SEC << "s, 按一次开再按关)\n"
-              << "    SELECT → 切换音色 (" << VOICE_NAMES[0] << " ↔ " << VOICE_NAMES[1] << ")\n"
+    std::cout << "    SELECT → 切换音色 (" << VOICE_NAMES[0] << " ↔ " << VOICE_NAMES[1] << ")\n"
               << "============================================================\n\n";
 
     /* ==================== 主循环 ==================== */
@@ -610,66 +604,16 @@ int main(int argc, char const* argv[]) {
             std::this_thread::sleep_for(400ms);
         }
 
-        /* ── ↓+A: 循环模式切换 ── */
-        if (gp.DownA()) {
-            if (g_loop_on.load()) {
-                g_loop_on.store(false);
-                LOG("[↓+A] ⏸ 循环模式 停止");
-            } else {
-                g_loop_on.store(true);
-                LOG("[↓+A] ▶ 循环模式 开始 (4场景,间隔" + std::to_string(LOOP_GAP_SEC) + "s)");
-            }
-            std::this_thread::sleep_for(400ms);
-        }
+        /* ── 手动单次播报模式 ── */
+        int scene_id = -1;
+        if (gp.LeftA())      scene_id = 0;
+        else if (gp.LeftB()) scene_id = 1;
+        else if (gp.LeftX()) scene_id = 2;
+        else if (gp.LeftY()) scene_id = 3;
 
-        /* ── 单键模式 ── */
-        if (!g_loop_on.load()) {
-            int scene_id = -1;
-            if (gp.LeftA())      scene_id = 0;
-            else if (gp.LeftB()) scene_id = 1;
-            else if (gp.LeftX()) scene_id = 2;
-            else if (gp.LeftY()) scene_id = 3;
-
-            if (scene_id >= 0 && !g_busy.load() && !g_pcm_data[scene_id][g_voice_version.load()].empty()) {
-                g_busy.store(true);
-                PlayScene(scene_id, audio, arm, left_hand_pub, right_hand_pub, arm_ok);
-                g_busy.store(false);
-                std::this_thread::sleep_for(COOLDOWN_MS * 1ms);
-            }
-        }
-
-        /* ── 循环模式 ── */
-        if (g_loop_on.load() && !g_busy.load()) {
+        if (scene_id >= 0 && !g_busy.load() && !g_pcm_data[scene_id][g_voice_version.load()].empty()) {
             g_busy.store(true);
-            for (int i = 0; i < SCENE_COUNT && g_loop_on.load() && g_running.load(); ++i) {
-                if (g_pcm_data[i][g_voice_version.load()].empty()) continue;
-                PlayScene(i, audio, arm, left_hand_pub, right_hand_pub, arm_ok);
-
-                /* 间隔（期间检查停止按键） */
-                if (i < SCENE_COUNT - 1 && g_loop_on.load()) {
-                    LOG("  ⏸ 等待 " + std::to_string(LOOP_GAP_SEC) + "s...");
-                    int waited = 0;
-                    while (waited < LOOP_GAP_SEC * 1000 && g_running.load() && g_loop_on.load()) {
-                        std::this_thread::sleep_for(100ms);
-                        waited += 100;
-                        { std::lock_guard<std::mutex> lk(mx); gp.Update(msg); }
-                        if (gp.DownA()) {
-                            g_loop_on.store(false);
-                            LOG("[↓+A] ⏸ 循环模式 停止");
-                            std::this_thread::sleep_for(400ms);
-                            break;
-                        }
-                        if (gp.SelectPress()) {
-                            VoiceVersion current = g_voice_version.load();
-                            VoiceVersion next = (current == VOICE_DEFAULT) ? VOICE_XIAOBEI : VOICE_DEFAULT;
-                            g_voice_version.store(next);
-                            LOG("[SELECT] 循环模式中切换音色: " + std::string(VOICE_NAMES[current]) 
-                                + " → " + std::string(VOICE_NAMES[next]));
-                            std::this_thread::sleep_for(400ms);
-                        }
-                    }
-                }
-            }
+            PlayScene(scene_id, audio, arm, left_hand_pub, right_hand_pub, arm_ok);
             g_busy.store(false);
             std::this_thread::sleep_for(COOLDOWN_MS * 1ms);
         }
