@@ -27,3 +27,6 @@ NX-fixing-method.pdf
 # System files
 .DS_Store
 Thumbs.db
+
+# Voice source files: keep runtime PCM in repo, ignore MP3 source exports
+voice_pack/**/*.mp3
